@@ -1,0 +1,74 @@
+# =====================================================================
+# FleetGuard configuration
+# Every tunable value in the pipeline lives here so experiments are
+# reproducible and the triage rules can be reviewed without reading code.
+# =====================================================================
+
+seed: 42
+
+paths:
+  raw_data: data/raw/CMAPSSData
+  incoming_data: data/incoming        # new run-to-failure batches land here
+  models: models                      # versioned model bundles + registry
+  outputs: outputs                    # fleet scores, work orders, reports
+  mlflow_tracking_uri: sqlite:///mlflow.db
+
+# ---------------------------------------------------------------------
+# Dataset subsets. FD002/FD004 run under 6 operating conditions, so the
+# sensors must be normalised per condition before trends are comparable.
+# FD003/FD004 contain two fault modes (HPC + fan degradation).
+# ---------------------------------------------------------------------
+subsets:
+  FD001: {operating_conditions: 1, fault_modes: 1}
+  FD002: {operating_conditions: 6, fault_modes: 1}
+  FD003: {operating_conditions: 1, fault_modes: 2}
+  FD004: {operating_conditions: 6, fault_modes: 2}
+
+data:
+  rul_cap: 125                 # piecewise-linear target: early life is "healthy"
+  validation_fraction: 0.2     # held-out *engines* (never rows) for model selection
+  snapshots_per_val_engine: 6  # random truncations that mimic the test protocol
+  outlier_z: 6.0               # |z| above this (per condition) is treated as a glitch
+  max_gap_fill: 5              # longest run of missing cycles that is interpolated
+
+features:
+  ewma_alpha: 0.3              # light exponential smoothing against sensor noise
+  windows: [10, 30]            # rolling mean / std / slope windows (cycles)
+  baseline_cycles: 10          # first N cycles define each engine's own baseline
+  min_sensor_corr: 0.05        # drop sensors with |Spearman(RUL)| below this
+
+training:
+  candidates: [ridge, random_forest, xgboost, lightgbm]
+  selection_metric: val_rmse
+  imbalance_bins: [0, 25, 50, 75, 100, 126]   # RUL bins for sample re-weighting
+  imbalance_power: 0.5        # 0 = no reweighting, 1 = full inverse frequency
+  interval_coverage: 0.8      # target coverage of the conformal RUL interval
+
+anomaly:
+  healthy_rul: 125            # rows with true RUL above this train the detectors
+  threshold_quantile: 0.99    # alarm threshold on healthy validation scores
+  persistence: 3              # consecutive anomalous cycles before alarming
+  degraded_rul: 30            # "failure is near" positive class for evaluation
+
+# ---------------------------------------------------------------------
+# Triage agent. Thresholds are in cycles of remaining useful life.
+# `calibrate: true` re-derives high_rul from validation data so that
+# at least `target_recall` of engines truly within `degraded_rul` cycles
+# of failure receive a work order; values are clipped to the bounds.
+# ---------------------------------------------------------------------
+triage:
+  critical_rul: 15
+  high_rul: 30
+  medium_rul: 60
+  calibrate: true
+  target_recall: 0.95
+  high_rul_bounds: [25, 50]
+  min_history: 15             # fewer observed cycles -> human review
+  max_interval_width: 90      # very uncertain prediction -> human review
+  max_imputed_fraction: 0.2   # too much repaired data -> human review
+  disagreement_rul: 90        # persistent anomaly but RUL lower bound above this
+
+retraining:
+  initial_engine_fraction: 0.7   # demo: v1 sees 70% of engines, rest arrive later
+  promotion_tolerance: 0.0       # challenger must not be worse by more than this RMSE
+  psi_alert: 0.2                 # population stability index alert level
