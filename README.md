@@ -37,6 +37,15 @@ the same way, which is the error that matters for maintenance decisions. *Uncapp
 RUL. On FD002/FD004 many test engines have 150-190 cycles left, and a capped model cannot (and need not) tell those
 apart, so that column is larger. It is the one to use when comparing with papers that do not cap the test labels.
 
+**Risk assessment** (test fleet, last cycle of each engine):
+
+| Subset | P(fail ≤30) ROC-AUC | Brier score | Calibration error (ECE) | Health score ↔ true RUL (Spearman ρ) |
+|---|---|---|---|---|
+| FD001 | 0.996 | 0.025 | 0.032 | 0.91 |
+| FD002 | 1.000 | 0.009 | 0.025 | 0.94 |
+| FD003 | 1.000 | 0.013 | 0.043 | 0.94 |
+| FD004 | 0.994 | 0.026 | 0.033 | 0.93 |
+
 * **RMSE / MAE** in cycles. **NASA score** is the PHM08 asymmetric score (late predictions cost more; lower is better).
 * **Coverage** is the share of test engines whose true RUL falls inside the 80% conformal interval.
 * **Agent recall** is the share of engines truly ≤ 30 cycles from failure that got a work order or human review. **False alarms** is the share of engines with > 90 cycles left that got a maintenance order. **Missed** is the number of engines ≤ 15 cycles from failure left without action.
@@ -47,12 +56,15 @@ apart, so that column is larger. It is the one to use when comparing with papers
 * **Robust data engineering.** Duplicates, out-of-order messages, gaps and spikes are repaired and counted, and tests prove recovery from a deliberately corrupted feed. All features are **strictly causal**, so one code path serves batch scoring, streaming and the per-cycle RUL trajectory (this is unit-tested).
 * **Model selection with MLflow.** Ridge, Random Forest, XGBoost and LightGBM are compared, each as a nested MLflow run, using engine-level validation with no leakage. Mild **imbalance re-weighting** gives more weight to the rare near-failure rows.
 * **Uncertainty.** Mondrian split-conformal intervals, with coverage verified on the test set.
-* **Two anomaly detectors** (Mahalanobis, Isolation Forest), trained only on healthy data. Their thresholds are set from healthy validation engines, alarms require persistence, and the detectors are compared by PR-AUC and lead time.
+* **Risk assessment.** A calibrated **probability of failure within 30 cycles** (logistic model on RUL + anomaly signal, checked with a reliability curve, Brier score and ROC-AUC) and a transparent **0-100 health score** with Good/Fair/Poor/Critical bands, both shown on the dashboard and in every work order.
+* **Three anomaly detectors** (Mahalanobis, Isolation Forest, and a neural-network autoencoder), trained only on healthy data. Their thresholds are set from healthy validation engines, alarms require persistence, and the detectors are compared by PR-AUC and lead time.
+* **SHAP explanations in every work order.** The 3 sensors that pulled the predicted RUL down, in cycles (e.g. "phi −9 cycles"), shown next to the sensor-deviation evidence.
+* **SQLite storage.** Work orders with their full history, and every scoring run with each engine's prediction, queryable with SQL; the dashboard and pipeline write safely side by side.
 * **Triage agent with no LLM.** Ordered rules with reason codes. The *high* threshold is **calibrated** on validation data to reach 95% recall, the agent is uncertainty-aware (it uses the interval's lower bound), and it sends exceptions (bad data, disagreeing models, huge uncertainty) to humans.
 * **Work-order lifecycle.** One open order per engine, which is updated or escalated in place and never auto-downgraded. Only humans close or reject orders, and every order keeps a full history.
 * **MLOps loop.** New data in `data/incoming/` triggers a drift check (PSI), a challenger is trained and compared with the champion, then promoted or rejected. MLflow Model Registry aliases and a local versioned registry keep track of versions.
 * **Predict on new data.** Upload engine histories (CSV or NASA .txt), add a new sensor reading to an engine and watch the prediction update, or use a what-if simulator that drifts sensors and shows how the RUL and the agent react.
-* **A 47-test pytest suite** covering data, features, models, agent rules, work orders, new-data inference, and an end-to-end integration run.
+* **A 66-test pytest suite** covering data, features, models, agent rules, work orders, new-data inference, and an end-to-end integration run.
 
 ## Quick start
 
@@ -80,7 +92,7 @@ The NASA C-MAPSS files are expected in `data/raw/CMAPSSData/` (from
 1. **Train v1** on 70% of the training engines and register it as champion.
 2. **New data arrives**: the remaining 30% of engines are written to `data/incoming/` as a new batch.
 3. **Retrain**: drift check of the batch, train v2 on all engines, compare it with v1, then promote or reject.
-4. **Score the fleet** (the official test engines). The agent decides for each engine and work orders are written to `outputs/work_orders.json` and as Markdown files.
+4. **Score the fleet** (the official test engines). The agent decides for each engine and work orders are stored in a SQLite database (`outputs/fleetguard.db`) and also written as Markdown files, and the scoring run with every engine's prediction is recorded.
 5. **Streaming replay**: the test fleet is replayed cycle by cycle, and work orders appear and escalate over time.
 
 ### Individual commands
@@ -170,7 +182,7 @@ src/fleetguard/
   data/cleaning.py           validation, repair, fault injection
   data/features.py           regimes, normalisation, causal rolling features
   models/rul.py              candidate models, imbalance weights, conformal intervals
-  models/anomaly.py          Mahalanobis + Isolation Forest, persistence, lead time
+  models/anomaly.py          Mahalanobis + Isolation Forest + autoencoder, persistence, lead time
   models/metrics.py          RMSE/MAE/NASA score, PR-AUC, agent metrics
   agent/triage.py            rule-based triage agent + threshold calibration
   agent/work_orders.py       work-order store, dedup/escalation, Markdown rendering
@@ -179,6 +191,8 @@ src/fleetguard/
   mlops/drift.py             Population Stability Index
   training.py                builds one versioned bundle per subset
   scoring.py                 fleet scoring -> agent -> work orders
+  explain.py                 SHAP explanations summarised per sensor
+  storage.py                 SQLite: work orders, their history, scoring runs, predictions
   inference.py               new data: uploads, single new readings, what-if scenarios
   pipeline.py                train / retrain / score / stream / run-all
   cli.py                     command line

@@ -1,7 +1,9 @@
 """Work-order creation, de-duplication, escalation and persistence.
 
-The store is a single JSON file so it is easy to inspect and diff. The
-agent never opens a second order for an engine that already has one open:
+Storage: a SQLite database (`.db` path, the default for the real system;
+see `fleetguard.storage`) or a single JSON file (`.json` path, used for the
+streaming replay and quick experiments). The agent never opens a second order
+for an engine that already has one open:
 it updates the existing order, and escalates it if the severity rises.
 Orders are only closed by a human (dashboard or CLI), never automatically.
 """
@@ -14,6 +16,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..models.risk import health_band
 from .triage import SEVERITY_RANK, Decision
 
 ORDER_TYPE = {
@@ -30,10 +33,24 @@ def _now() -> str:
 
 
 class WorkOrderStore:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, import_json: str | Path | None = None):
         self.path = Path(path)
+        self.db = None
+        self._dirty: set[str] = set()
         self.orders: list[dict] = []
-        if self.path.exists():
+        if self.path.suffix in (".db", ".sqlite"):
+            from ..storage import Database
+
+            self.db = Database(self.path)
+            self.orders = self.db.load_orders()
+            # One-time migration from the earlier JSON store.
+            legacy = Path(import_json) if import_json else None
+            if not self.orders and legacy is not None and legacy.exists():
+                self.orders = json.loads(legacy.read_text(encoding="utf-8"))
+                self._dirty = {wo["wo_id"] for wo in self.orders}
+                self.save()
+                legacy.rename(legacy.with_suffix(".json.migrated"))
+        elif self.path.exists():
             self.orders = json.loads(self.path.read_text(encoding="utf-8"))
 
     # --------------------------------------------------------------- queries
@@ -78,6 +95,7 @@ class WorkOrderStore:
                 "history": [{"at": _now(), "cycle": decision.cycle, "event": "CREATED", "severity": decision.severity}],
             }
             self.orders.append(wo)
+            self._dirty.add(wo["wo_id"])
             return "CREATED", wo
 
         if SEVERITY_RANK[decision.severity] > SEVERITY_RANK[existing["severity"]] or (
@@ -90,14 +108,18 @@ class WorkOrderStore:
                 requires_human=decision.severity == "REVIEW", **snapshot,
             )
             existing["history"].append({"at": _now(), "cycle": decision.cycle, "event": "ESCALATED", "severity": decision.severity})
+            self._dirty.add(existing["wo_id"])
             return "ESCALATED", existing
 
-        # Same or lower severity: refresh the latest evidence, never auto-downgrade.
-        if existing.get("last_cycle") != decision.cycle:
-            existing.update(**snapshot)
-            if decision.severity == existing["severity"] and decision.due_within_cycles is not None:
-                existing["due_within_cycles"] = decision.due_within_cycles
+        # Same or lower severity: refresh the latest evidence (new readings or a newer
+        # model version), never auto-downgrade. History only records new cycles.
+        new_cycle = existing.get("last_cycle") != decision.cycle
+        existing.update(**snapshot)
+        if decision.severity == existing["severity"] and decision.due_within_cycles is not None:
+            existing["due_within_cycles"] = decision.due_within_cycles
+        if new_cycle:
             existing["history"].append({"at": _now(), "cycle": decision.cycle, "event": "UPDATED", "severity": decision.severity})
+        self._dirty.add(existing["wo_id"])
         return "UPDATED", existing
 
     def set_status(self, wo_id: str, status: str, note: str = "", by: str = "engineer") -> dict:
@@ -109,10 +131,26 @@ class WorkOrderStore:
             raise KeyError(wo_id)
         wo["status"] = status
         wo["history"].append({"at": _now(), "event": f"STATUS_{status}", "by": by, "note": note})
+        self._dirty.add(wo_id)
         return wo
+
+    def remove_fleets(self, fleets) -> None:
+        """Delete every order of these fleets (used when a demo is reset)."""
+        fleets = set(fleets)
+        removed = {o["wo_id"] for o in self.orders if o["subset"] in fleets}
+        self.orders = [o for o in self.orders if o["subset"] not in fleets]
+        self._dirty -= removed
+        if self.db is not None:
+            self.db.delete_fleets(fleets)
+        else:
+            self.save()
 
     # ----------------------------------------------------------------- save
     def save(self) -> None:
+        if self.db is not None:
+            self.db.save_orders([wo for wo in self.orders if wo["wo_id"] in self._dirty])
+            self._dirty.clear()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -128,9 +166,12 @@ class WorkOrderStore:
             "rul_interval": [d.rul_lower, d.rul_upper],
             "anomaly_index": d.anomaly_index,
             "anomaly_alarm": d.anomaly_alarm,
+            "failure_prob": d.failure_prob,
+            "health_score": d.health_score,
             "reasons": d.reasons,
             "reason_codes": d.reason_codes,
             "indicators": d.indicators,
+            "model_drivers": d.drivers,
             "recommended_checks": d.checks,
             "model_version": model_version,
             "updated_at": _now(),
@@ -156,6 +197,8 @@ def render_markdown(wo: dict) -> str:
         f"| Status | {wo['status']} |",
         f"| Estimated RUL | {wo['rul_pred']:.0f} cycles (80% interval {lo:.0f}-{hi:.0f}) |",
         f"| Anomaly index | {wo['anomaly_index']:.2f} ({'persistent alarm' if wo['anomaly_alarm'] else 'no persistent alarm'}) |",
+        *([f"| P(failure within 30 cycles) | {wo['failure_prob']:.0%} |"] if wo.get("failure_prob") is not None else []),
+        *([f"| Health score | {wo['health_score']:.0f} / 100 ({health_band(wo['health_score'])}) |"] if wo.get("health_score") is not None else []),
         f"| Due within | {'immediately' if wo['due_within_cycles'] == 0 else str(wo['due_within_cycles']) + ' cycles' if wo['due_within_cycles'] is not None else 'n/a'} |",
         f"| Observed at cycle | {wo['last_cycle']} |",
         f"| Model version | {wo['model_version']} |",
@@ -171,6 +214,15 @@ def render_markdown(wo: dict) -> str:
             f"| {i['name']} ({i['sensor']}) | {i['description']} | {i['component']} | {i['deviation_sd']:+.1f} SD, {i['direction']} |"
             for i in wo["indicators"]
         ]
+    if wo.get("model_drivers"):
+        lines += ["", "## What drove the RUL prediction down (SHAP)",
+                  "| Sensor | Meaning | Component | Effect on predicted RUL |", "|---|---|---|---|"]
+        lines += [
+            f"| {x['name']} ({x['sensor']}) | {x['description']} | {x['component']} | {x['shap_cycles']:+.0f} cycles |"
+            for x in wo["model_drivers"]
+        ]
+        lines += ["", "_SHAP shows which sensor features moved the model's estimate below that of an average engine. "
+                      "It explains the model, not a confirmed root cause._"]
     if wo["recommended_checks"]:
         lines += ["", "## Suggested checks", *[f"- {c}" for c in wo["recommended_checks"]]]
     lines += [

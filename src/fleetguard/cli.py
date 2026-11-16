@@ -87,9 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         ev = fg.stream(args.subset, step=args.step)
         print(ev.groupby(["event", "severity"]).size().to_string())
     elif args.cmd in ("work-orders", "close"):
-        from .agent.work_orders import WorkOrderStore
-
-        store = WorkOrderStore(cfg.path("outputs") / "work_orders.json")
+        store = fg.work_orders()
         if args.cmd == "close":
             wo = store.set_status(args.wo_id, args.status, args.note)
             store.save()

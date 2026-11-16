@@ -30,6 +30,10 @@ class FleetGuard:
         self.candidates = candidates
 
     # ------------------------------------------------------------ helpers
+    def work_orders(self) -> WorkOrderStore:
+        """The work-order store (SQLite). Imports an older work_orders.json once, if present."""
+        return WorkOrderStore(self.cfg.path("database"), import_json=self.cfg.path("outputs") / "work_orders.json")
+
     def registry(self, subset: str) -> ModelRegistry:
         return ModelRegistry(self.cfg.path("models"), subset)
 
@@ -175,9 +179,10 @@ class FleetGuard:
         from .data.loader import add_test_rul
 
         fleet_raw = add_test_rul(data["test"], data["test_rul"])  # true RUL kept only for evaluation columns
-        store = WorkOrderStore(self.cfg.path("outputs") / "work_orders.json")
+        store = self.work_orders()
         fleet, hist, quality = score_fleet(bundle, fleet_raw, store)
         store.save()
+        run_id = store.db.record_scoring(subset, bundle["version"], fleet)
 
         out = self.out_dir(subset)
         fleet.to_csv(out / "fleet_latest.csv", index=False)
@@ -198,6 +203,7 @@ class FleetGuard:
         monitoring = {
             "subset": subset,
             "model_version": bundle["version"],
+            "scoring_run_id": run_id,
             "scored_at": pd.Timestamp.now(tz="UTC").isoformat(timespec="seconds"),
             "engines": int(len(fleet)),
             "severity_counts": fleet["severity"].value_counts().to_dict(),
@@ -290,8 +296,4 @@ class FleetGuard:
             inc = self.cfg.path("incoming_data")
             for p in list(inc.glob(f"{subset}_*")) + list((inc / "archive").glob(f"{subset}_*")):
                 p.unlink()
-        wo_path = self.cfg.path("outputs") / "work_orders.json"
-        if wo_path.exists():
-            store = WorkOrderStore(wo_path)
-            store.orders = [o for o in store.orders if o["subset"] not in subsets]
-            store.save()
+        self.work_orders().remove_fleets(subsets)

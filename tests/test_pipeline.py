@@ -32,19 +32,25 @@ def test_closed_loop_end_to_end(tmp_cfg):
     fleet = fg.score("FD001")
     assert len(fleet) == 100
     assert set(fleet["severity"]) <= {"CRITICAL", "HIGH", "MEDIUM", "LOW", "REVIEW"}
+    assert fleet["failure_prob"].between(0, 1).all() and fleet["health_score"].between(0, 100).all()
+    metrics = json.loads((tmp_cfg.path("outputs") / "FD001" / "evaluation" / "metrics.json").read_text())
+    assert metrics["risk_model"]["horizon"] == 30 and 0 <= metrics["metrics"]["test_failure_prob_brier"] <= 1
     out = tmp_cfg.path("outputs") / "FD001"
     for name in ("fleet_latest.csv", "fleet_history.csv.gz", "monitoring.json", "drift_fleet.csv",
                  "evaluation/metrics.json", "evaluation/test_predictions.csv"):
         assert (out / name).exists(), name
 
-    store = WorkOrderStore(tmp_cfg.path("outputs") / "work_orders.json")
+    store = WorkOrderStore(tmp_cfg.path("database"))
     n_orders = len(store.orders)
     assert n_orders == (fleet["severity"] != "LOW").sum()
     assert len(list((out / "work_orders").glob("WO-*.md"))) == n_orders
 
     # Re-scoring the same fleet is idempotent: orders are updated, not duplicated.
     fg.score("FD001")
-    assert len(WorkOrderStore(tmp_cfg.path("outputs") / "work_orders.json").orders) == n_orders
+    assert len(WorkOrderStore(tmp_cfg.path("database")).orders) == n_orders
+    runs = store.db.scoring_runs("FD001")
+    assert len(runs) == 2 and (runs["engines"] == 100).all()      # both scoring runs recorded
+    assert len(store.db.engine_history("FD001", 1)) == 2
 
     # Streaming replay produces work orders over time with escalations.
     events = fg.stream("FD001", step=25)

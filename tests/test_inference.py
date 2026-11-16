@@ -6,17 +6,11 @@ import pytest
 from fleetguard import inference
 from fleetguard.agent.work_orders import WorkOrderStore
 from fleetguard.data.loader import RAW_COLS
-from fleetguard.pipeline import FleetGuard
 
 
 @pytest.fixture(scope="module")
-def bundle(tmp_path_factory, cfg):
-    tmp = tmp_path_factory.mktemp("inf")
-    c = cfg.override(paths={"raw_data": str(cfg.path("raw_data")), "incoming_data": str(tmp / "in"),
-                            "models": str(tmp / "models"), "outputs": str(tmp / "out")})
-    fg = FleetGuard(c, track=False, fast=True, candidates=["lightgbm"])
-    fg.train("FD001")
-    return fg.registry("FD001").load()
+def bundle(fast_bundle):
+    return fast_bundle
 
 
 @pytest.fixture(scope="module")

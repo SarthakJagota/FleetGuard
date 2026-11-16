@@ -13,6 +13,7 @@ Decision flow (first matching rule wins):
     2. RUL <= critical     -> CRITICAL  (work order P1, ground / immediate maintenance)
     3. RUL <= high, or the
        lower interval bound <= critical, or
+       P(failure within 30) >= 0.5, or
        anomaly alarm with RUL <= medium -> HIGH  (work order P2, schedule maintenance)
     4. Interval too wide, or persistent
        anomaly while the RUL lower bound
@@ -55,6 +56,7 @@ class TriageThresholds:
     max_interval_width: float = 90
     max_imputed_fraction: float = 0.2
     disagreement_rul: float = 90
+    high_failure_prob: float = 0.5
 
     @classmethod
     def from_config(cls, cfg, high_rul: float | None = None) -> "TriageThresholds":
@@ -64,6 +66,7 @@ class TriageThresholds:
             medium_rul=t["medium_rul"], min_history=t["min_history"],
             max_interval_width=t["max_interval_width"], max_imputed_fraction=t["max_imputed_fraction"],
             disagreement_rul=t["disagreement_rul"],
+            high_failure_prob=cfg.get("risk", {}).get("high_failure_prob", 0.5),
         )
 
 
@@ -81,8 +84,11 @@ class Decision:
     anomaly_index: float
     anomaly_alarm: bool
     due_within_cycles: int | None
+    failure_prob: float | None = None
+    health_score: float | None = None
     indicators: list[dict] = field(default_factory=list)
     checks: list[str] = field(default_factory=list)
+    drivers: list[dict] = field(default_factory=list)   # SHAP: sensors that lowered the predicted RUL
 
     @property
     def creates_work_order(self) -> bool:
@@ -129,6 +135,10 @@ class TriageAgent:
         alarm = bool(state.get("anomaly_alarm", False))
         n_cycles = int(state.get("n_cycles", t.min_history))
         imputed = float(state.get("imputed_fraction", 0.0))
+        pf = state.get("failure_prob")
+        pf = float(pf) if pf is not None and math.isfinite(float(pf)) else None
+        health = state.get("health_score")
+        health = float(health) if health is not None and math.isfinite(float(health)) else None
 
         reasons: list[tuple[str, str]] = []
         severity = None
@@ -154,7 +164,8 @@ class TriageAgent:
             if rul <= t.critical_rul:
                 severity = "CRITICAL"
                 reasons.append(("RUL_CRITICAL", f"Predicted RUL {rul:.0f} <= {t.critical_rul:.0f} cycles"))
-            elif rul <= t.high_rul or lo <= t.critical_rul or (alarm and rul <= t.medium_rul):
+            elif (rul <= t.high_rul or lo <= t.critical_rul or (alarm and rul <= t.medium_rul)
+                  or (pf is not None and pf >= t.high_failure_prob)):
                 severity = "HIGH"
                 if rul <= t.high_rul:
                     reasons.append(("RUL_HIGH", f"Predicted RUL {rul:.0f} <= {t.high_rul:.0f} cycles"))
@@ -162,6 +173,8 @@ class TriageAgent:
                     reasons.append(("RUL_LOWER_BOUND", f"Lower interval bound {lo:.0f} <= {t.critical_rul:.0f} cycles"))
                 if alarm and rul <= t.medium_rul:
                     reasons.append(("ANOMALY_AND_RUL", f"Persistent anomaly with RUL {rul:.0f} <= {t.medium_rul:.0f}"))
+                if pf is not None and pf >= t.high_failure_prob:
+                    reasons.append(("FAILURE_PROB_HIGH", f"P(failure within 30 cycles) = {pf:.0%} >= {t.high_failure_prob:.0%}"))
             elif hi - lo > t.max_interval_width:
                 severity = "REVIEW"
                 reasons.append(("HIGH_UNCERTAINTY", f"Interval width {hi - lo:.0f} > {t.max_interval_width:.0f} cycles"))
@@ -187,6 +200,8 @@ class TriageAgent:
             rul_upper=round(hi, 1) if math.isfinite(hi) else hi,
             anomaly_index=round(idx, 3) if math.isfinite(idx) else idx, anomaly_alarm=alarm,
             due_within_cycles=self._due(severity, lo), indicators=indicators, checks=checks,
+            failure_prob=round(pf, 4) if pf is not None else None,
+            health_score=round(health, 1) if health is not None else None,
         )
 
     @staticmethod

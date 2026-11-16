@@ -29,4 +29,19 @@ def tmp_cfg(cfg, tmp_path):
         "incoming_data": str(tmp_path / "incoming"),
         "models": str(tmp_path / "models"),
         "outputs": str(tmp_path / "outputs"),
+        "database": str(tmp_path / "outputs" / "fleetguard.db"),
     })
+
+
+@pytest.fixture(scope="session")
+def fast_bundle(tmp_path_factory, cfg):
+    """A small LightGBM FD001 model bundle (trained once per test session)."""
+    from fleetguard.pipeline import FleetGuard
+
+    tmp = tmp_path_factory.mktemp("bundle")
+    c = cfg.override(paths={"raw_data": str(cfg.path("raw_data")), "incoming_data": str(tmp / "in"),
+                            "models": str(tmp / "models"), "outputs": str(tmp / "out"),
+                            "database": str(tmp / "out" / "fleetguard.db")})
+    fg = FleetGuard(c, track=False, fast=True, candidates=["lightgbm"])
+    fg.train("FD001")
+    return fg.registry("FD001").load()

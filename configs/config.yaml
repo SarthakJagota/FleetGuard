@@ -11,6 +11,7 @@ paths:
   incoming_data: data/incoming        # new run-to-failure batches land here
   models: models                      # versioned model bundles + registry
   outputs: outputs                    # fleet scores, work orders, reports
+  database: outputs/fleetguard.db     # SQLite: work orders, their history, every scoring run
   mlflow_tracking_uri: sqlite:///mlflow.db
 
 # ---------------------------------------------------------------------
@@ -67,6 +68,14 @@ triage:
   max_interval_width: 90      # very uncertain prediction -> human review
   max_imputed_fraction: 0.2   # too much repaired data -> human review
   disagreement_rul: 90        # persistent anomaly but RUL lower bound above this
+
+# ---------------------------------------------------------------------
+# Risk assessment: calibrated failure probability + 0-100 health score.
+# ---------------------------------------------------------------------
+risk:
+  horizon: 30                 # P(failure within this many cycles)
+  health_rul_weight: 0.75     # health = 100 * (w * RUL part + (1 - w) * anomaly part)
+  high_failure_prob: 0.5      # triage: probability at/above this -> HIGH
 
 retraining:
   initial_engine_fraction: 0.7   # demo: v1 sees 70% of engines, rest arrive later

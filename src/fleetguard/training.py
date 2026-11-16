@@ -30,6 +30,7 @@ from .mlops.drift import reference_sample
 from .mlops.tracking import Tracker
 from .models.anomaly import AnomalyDetector
 from .models.metrics import agent_metrics, error_by_bucket, interval_metrics, regression_metrics, warning_metrics
+from .models.risk import FailureRisk, calibration_table, risk_metrics
 from .models.rul import (
     MODEL_DESCRIPTIONS, ConformalIntervals, RULModel, best_iteration, fit_model, imbalance_weights, make_model,
 )
@@ -99,21 +100,32 @@ def train_bundle(
         best = comparison_df.iloc[0]["model"]
         rul_model = fitted[best]
 
-        # ---------------------------------------------- uncertainty intervals
-        # Cross-conformal: residuals from out-of-fold predictions on the training
-        # engines (refits of the chosen model) plus the validation snapshots. The
-        # validation engines alone are too few, and were also used for early stopping.
-        oof = out_of_fold(best, rul_model.estimator, tr, feats, y_tr, w_tr, seed, fast)
-        oof_snap = truncation_snapshots(tr.assign(_oof=oof), 10, seed)
-        calib_pred = np.r_[oof_snap["_oof"].to_numpy(), rul_model.predict_point(va_snap)]
-        calib_true = np.r_[oof_snap["rul_capped"].to_numpy(), va_snap["rul"].clip(upper=cap).to_numpy()]
-        rul_model.intervals = ConformalIntervals(cfg["training"]["interval_coverage"]).fit(calib_pred, calib_true)
-
         # ------------------------------------------------- anomaly detection
         a_cfg = cfg["anomaly"]
         detector = AnomalyDetector(fp.health_columns, a_cfg["threshold_quantile"], a_cfg["persistence"], seed)
         detector.fit(tr[tr["rul"] > a_cfg["healthy_rul"]], va[va["rul"] > a_cfg["healthy_rul"]])
         anomaly_val = detector.evaluate(va, a_cfg["degraded_rul"], a_cfg["healthy_rul"])
+
+        # ---------------------------------------------- uncertainty intervals
+        # Cross-conformal: residuals from out-of-fold predictions on the training
+        # engines (refits of the chosen model) plus the validation snapshots. The
+        # validation engines alone are too few, and were also used for early stopping.
+        oof = out_of_fold(best, rul_model.estimator, tr, feats, y_tr, w_tr, seed, fast)
+        tr_anom = detector.score(tr)["anomaly_index"].to_numpy()
+        oof_snap = truncation_snapshots(tr.assign(_oof=oof, _anom=tr_anom), 10, seed)
+        va_snap = va_snap.merge(
+            va[["engine_id", "cycle"]].assign(_anom=detector.score(va)["anomaly_index"].to_numpy()),
+            on=["engine_id", "cycle"], how="left",
+        )
+        calib_pred = np.r_[oof_snap["_oof"].to_numpy(), rul_model.predict_point(va_snap)]
+        calib_true = np.r_[oof_snap["rul_capped"].to_numpy(), va_snap["rul"].clip(upper=cap).to_numpy()]
+        calib_anom = np.r_[oof_snap["_anom"].to_numpy(), va_snap["_anom"].to_numpy()]
+        rul_model.intervals = ConformalIntervals(cfg["training"]["interval_coverage"]).fit(calib_pred, calib_true)
+
+        # ------------------------------------------------- risk assessment
+        r_cfg = cfg.get("risk", {})
+        risk = FailureRisk(r_cfg.get("horizon", 30), cap, r_cfg.get("health_rul_weight", 0.75))
+        risk.fit(calib_pred, calib_anom, calib_true)
 
         # ---------------------------------------------- triage calibration
         t_cfg = cfg["triage"]
@@ -138,9 +150,14 @@ def train_bundle(
         test_m.update(warning_metrics(te_all["rul"], te_scores["anomaly_index"], te_scores["anomaly_alarm"],
                                       a_cfg["degraded_rul"], prefix="test_anomaly_"))
 
+        last_scores = te_scores.loc[te_all.groupby("engine_id")["cycle"].idxmax()].reset_index(drop=True)
+        te_pred["failure_prob"] = risk.predict_proba(te_pred["rul_pred"], last_scores["anomaly_index"])
+        te_pred["health_score"] = risk.health(te_pred["rul_pred"], last_scores["anomaly_index"])
+        test_m.update(risk_metrics(te_pred["failure_prob"], te_pred["health_score"], te_last["rul"],
+                                   risk.horizon, cap, prefix="test_"))
+
         agent = TriageAgent(thresholds)
         decisions = []
-        last_scores = detector.score(te_all).loc[te_all.groupby("engine_id")["cycle"].idxmax()].reset_index(drop=True)
         for i, row in te_last.iterrows():
             state = {
                 "engine_id": row["engine_id"], "cycle": row["cycle"], "n_cycles": int(row["cycle"]),
@@ -170,6 +187,7 @@ def train_bundle(
             "model_comparison": comparison_df,
             "test_predictions": test_predictions,
             "error_buckets": error_by_bucket(te_last["rul"], te_pred["rul_pred"]),
+            "failure_prob_calibration": calibration_table(te_pred["failure_prob"], te_last["rul"] <= risk.horizon),
             "feature_importance": rul_model.feature_importance(30),
         }
         mlflow_version = tracker.log_model(rul_model.estimator, subset, X_va)
@@ -183,6 +201,7 @@ def train_bundle(
         "features": fp,
         "model": rul_model,
         "anomaly": detector,
+        "risk": risk,
         "thresholds": thresholds,
         "reference": reference_sample(tr, fp.health_columns + ["cycle"], seed=seed),
         "metrics": metrics,
@@ -201,6 +220,7 @@ def train_bundle(
         "data_quality": quality.to_dict(),
         "conformal": rul_model.intervals.to_dict(),
         "anomaly_thresholds": detector.thresholds_,
+        "risk_model": risk.to_dict(),
         "triage_thresholds": thresholds.__dict__,
         "triage_calibration": calibration,
         "metrics": {k: (round(v, 4) if isinstance(v, float) else v) for k, v in metrics.items()},

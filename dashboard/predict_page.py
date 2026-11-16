@@ -17,7 +17,6 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from fleetguard import inference
-from fleetguard.agent.work_orders import WorkOrderStore
 from fleetguard.data.loader import SENSOR_INFO, SETTING_COLS, sensor_label
 
 AUTO = "Auto (recommended)"
@@ -125,9 +124,18 @@ def _decision_card(ctx, d: dict, before: dict | None = None) -> None:
     c[2].metric("80% interval", f"{d['rul_lower']:.0f} – {d['rul_upper']:.0f}")
     c[3].metric("Anomaly index", f"{d['anomaly_index']:.2f}", "persistent alarm" if d["anomaly_alarm"] else None,
                 delta_color="inverse")
+    c = st.columns(4)
+    if pd.notna(d.get("health_score")):
+        hd = None if before is None or pd.isna(before.get("health_score")) else f"{d['health_score'] - before['health_score']:+.0f}"
+        c[0].metric("Health score", f"{d['health_score']:.0f} / 100 ({d.get('health_band', '')})", hd)
+    if pd.notna(d.get("failure_prob")):
+        pd_ = None if before is None or pd.isna(before.get("failure_prob")) else f"{(d['failure_prob'] - before['failure_prob']) * 100:+.0f} pts"
+        c[1].metric("P(fail ≤30 cycles)", f"{d['failure_prob']:.0%}", pd_, delta_color="inverse")
     st.markdown(f"**Action:** {d['action']}" + (f" · due within **{int(d['due_within_cycles'])}** cycles"
                                                  if pd.notna(d.get("due_within_cycles")) else ""))
-    st.markdown(f"**Rules fired:** `{d['reason_codes']}`" + (f"  \n**Primary indicators:** {d['indicators']}" if d.get("indicators") else ""))
+    st.markdown(f"**Rules fired:** `{d['reason_codes']}`"
+                + (f"  \n**Sensor deviations:** {d['indicators']}" if d.get("indicators") else "")
+                + (f"  \n**Model drivers (SHAP, cycles):** {d['model_drivers']}" if d.get("model_drivers") else ""))
 
 
 def _engine_source(ctx, key: str) -> tuple[pd.DataFrame, str, str | None]:
@@ -181,8 +189,8 @@ def _upload_tab(ctx, choice: str) -> None:
 
     show = fleet.copy()
     show["severity"] = show["severity"].map(ctx.severity_badge)
-    st.dataframe(show[["engine_id", "cycle", "severity", "rul_pred", "rul_lower", "rul_upper", "anomaly_index",
-                       "due_within_cycles", "indicators", "reason_codes"]].round(1),
+    st.dataframe(show[["engine_id", "cycle", "severity", "health_score", "failure_prob", "rul_pred", "rul_lower", "rul_upper", "anomaly_index",
+                       "due_within_cycles", "model_drivers", "indicators", "reason_codes"]].round(1),
                  hide_index=True, width="stretch")
 
     b1, b2 = st.columns(2)
@@ -191,9 +199,10 @@ def _upload_tab(ctx, choice: str) -> None:
                        f"predictions_{Path(up.name).stem}.csv", "text/csv")
     label = f"UPLOAD-{Path(up.name).stem}"
     if b2.button(f"Send to work-order system as fleet '{label}'"):
-        store = WorkOrderStore(ctx.out_dir / "work_orders.json")
-        inference.predict_upload(m.bundle, raw, store, fleet_label=label)
+        store = ctx.store()
+        sent, _, _ = inference.predict_upload(m.bundle, raw, store, fleet_label=label)
         store.save()
+        store.db.record_scoring(label, f"{m.subset}-{m.version}", sent)
         st.success(f"Work orders created/updated for fleet {label} - see the Work orders page.")
 
     engine = st.selectbox("Inspect an engine", fleet["engine_id"].tolist(), key="up_engine")

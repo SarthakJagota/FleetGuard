@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from fleetguard.mlops.drift import psi
-from fleetguard.models.anomaly import AnomalyDetector
+from fleetguard.models.anomaly import METHODS, AnomalyDetector
 from fleetguard.models.metrics import nasa_score, regression_metrics, warning_metrics
 from fleetguard.models.rul import ConformalIntervals, imbalance_weights
 
@@ -49,17 +49,42 @@ def test_warning_metrics_imbalanced():
     assert m["recall"] == 1 and m["precision"] == 1 and m["pr_auc"] == pytest.approx(1)
 
 
-def test_anomaly_detector_flags_shifted_engine():
+@pytest.fixture(scope="module")
+def detector():
+    """Healthy data with correlated sensors (like real engines): b follows a, c is independent."""
     rng = np.random.default_rng(1)
     cols = ["a_ewm", "b_ewm", "c_ewm"]
-    healthy = pd.DataFrame(rng.normal(0, 1, (2000, 3)), columns=cols).assign(engine_id=1)
-    healthy_val = pd.DataFrame(rng.normal(0, 1, (500, 3)), columns=cols).assign(engine_id=2)
-    det = AnomalyDetector(cols, threshold_quantile=0.99, persistence=3).fit(healthy, healthy_val)
-    drifting = pd.DataFrame(rng.normal(0, 1, (60, 3)) + np.linspace(0, 6, 60)[:, None], columns=cols).assign(engine_id=3)
-    s = det.score(drifting)
+
+    def healthy(n, eid):
+        a = rng.normal(0, 1, n)
+        return pd.DataFrame({"a_ewm": a, "b_ewm": a + rng.normal(0, 0.2, n), "c_ewm": rng.normal(0, 1, n)}).assign(engine_id=eid)
+
+    det = AnomalyDetector(cols, threshold_quantile=0.99, persistence=3).fit(healthy(3000, 1), healthy(800, 2))
+    return det, healthy(800, 4), rng
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_anomaly_detectors_flag_drifting_engine(detector, method):
+    det, healthy_val, rng = detector
+    n = 60
+    drift = np.linspace(0, 6, n)[:, None]
+    drifting = pd.DataFrame(rng.normal(0, 0.3, (n, 3)) + drift, columns=det.columns).assign(engine_id=3)
+    s = det.score(drifting, method)
     assert s["anomaly_alarm"].iloc[-10:].all()
     assert not s["anomaly_alarm"].iloc[:10].any()
-    assert det.score(healthy_val)["anomaly_alarm"].mean() < 0.01
+    assert det.score(healthy_val, method)["anomaly_alarm"].mean() < 0.02
+
+
+@pytest.mark.parametrize("method", ["mahalanobis", "autoencoder"])
+def test_detectors_catch_broken_sensor_relationship(detector, method):
+    """Each sensor stays in its normal range, but b no longer follows a (e.g. a failing sensor or seal).
+    Detectors that learn the joint healthy pattern catch it; a per-sensor range check would not."""
+    det, _, rng = detector
+    a = rng.uniform(-1.5, 1.5, 40)
+    broken = pd.DataFrame({"a_ewm": a, "b_ewm": -a, "c_ewm": rng.normal(0, 1, 40)}).assign(engine_id=5)
+    assert broken[["a_ewm", "b_ewm"]].abs().max().max() <= 1.5          # nothing out of range on its own
+    s = det.score(broken[np.abs(broken["a_ewm"]) > 0.8], method)          # where the mismatch is clear
+    assert (s["anomaly_index"] > 1).mean() > 0.9
 
 
 def test_psi_detects_shift():

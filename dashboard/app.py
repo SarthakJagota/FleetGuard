@@ -62,6 +62,11 @@ def js(path: Path):
     return read_json(str(path), mtime(path)) if path.exists() else None
 
 
+def work_order_store() -> WorkOrderStore:
+    """Work orders live in SQLite; an older work_orders.json is imported once."""
+    return WorkOrderStore(CFG.path("database"), import_json=OUT / "work_orders.json")
+
+
 @st.cache_resource
 def bundle_for(subset: str, version: str):
     return ModelRegistry(MODELS, subset).load(version)
@@ -145,14 +150,21 @@ if page == "Fleet overview":
     show["severity"] = show["severity"].map(severity_badge)
     show["RUL (80% interval)"] = show.apply(lambda r: f"{r.rul_pred:.0f}  [{r.rul_lower:.0f}–{r.rul_upper:.0f}]", axis=1)
     st.dataframe(
-        show[["engine_id", "severity", "RUL (80% interval)", "true_rul", "anomaly_index", "due_within_cycles",
-              "indicators", "reason_codes", "wo_id"]],
+        show[[c for c in ["engine_id", "severity", "health_score", "failure_prob", "RUL (80% interval)", "true_rul",
+                          "anomaly_index", "due_within_cycles", "model_drivers", "indicators", "reason_codes", "wo_id"]
+               if c in show.columns]],
         hide_index=True, width="stretch",
         column_config={
             "engine_id": "Engine", "true_rul": st.column_config.NumberColumn("True RUL", help="Known only because this is benchmark data"),
+            "health_score": st.column_config.ProgressColumn("Health", min_value=0, max_value=100, format="%.0f",
+                                                            help="0-100: remaining life, reduced by up to 25% for abnormal sensor behaviour"),
+            "failure_prob": st.column_config.NumberColumn("P(fail ≤30)", format="percent",
+                                                          help="Calibrated probability of failing within 30 cycles"),
             "anomaly_index": st.column_config.ProgressColumn("Anomaly index", min_value=0, max_value=3, format="%.2f",
                                                              help="Score / alarm threshold. >1 = outside healthy behaviour"),
-            "due_within_cycles": "Due (cycles)", "indicators": "Primary indicators", "reason_codes": "Rules fired", "wo_id": "Work order",
+            "due_within_cycles": "Due (cycles)", "indicators": "Sensor deviations", "reason_codes": "Rules fired", "wo_id": "Work order",
+            "model_drivers": st.column_config.TextColumn("Model drivers (SHAP)",
+                                                         help="Sensors that lowered the predicted RUL, in cycles (work-order engines only)"),
         },
     )
     st.caption("RUL is an estimate from historical run-to-failure data; the interval is a calibrated 80% conformal interval.")
@@ -176,8 +188,12 @@ elif page == "Engine detail":
     bundle = bundle_for(subset, champion)
     th = bundle["thresholds"]
 
-    c = st.columns(5)
+    c = st.columns(7)
     c[0].metric("Triage", severity_badge(row["severity"]))
+    if pd.notna(row.get("health_score")):
+        c[5].metric("Health score", f"{row['health_score']:.0f} / 100", row.get("health_band"), delta_color="off")
+    if pd.notna(row.get("failure_prob")):
+        c[6].metric("P(fail ≤30 cycles)", f"{row['failure_prob']:.0%}")
     c[1].metric("Predicted RUL", f"{row['rul_pred']:.0f} cycles", help="80% interval below")
     c[2].metric("80% interval", f"{row['rul_lower']:.0f} – {row['rul_upper']:.0f}")
     c[3].metric("True RUL (benchmark)", int(row["true_rul"]))
@@ -209,6 +225,25 @@ elif page == "Engine detail":
                           yaxis_title="score ÷ threshold", hovermode="x unified", legend=dict(orientation="h", y=-0.2))
         st.plotly_chart(style(fig, 380), width="stretch")
 
+    if "health_score" in hist.columns:
+        left, right = st.columns(2)
+        with left:
+            fig = go.Figure(go.Scatter(x=hist["cycle"], y=hist["health_score"], line=dict(color=SERIES[0], width=2),
+                                       name="Health score"))
+            for v, name in [(80, "Good"), (50, "Fair"), (25, "Poor")]:
+                fig.add_hline(y=v, line_dash="dot", line_color=MUTED, annotation_text=name)
+            fig.update_layout(title="Health score (0-100) over the engine's life", xaxis_title="cycle",
+                              yaxis=dict(title="health", range=[0, 102]), hovermode="x unified")
+            st.plotly_chart(style(fig, 320), width="stretch")
+        with right:
+            if hist["failure_prob"].notna().any():
+                fig = go.Figure(go.Scatter(x=hist["cycle"], y=hist["failure_prob"], line=dict(color=SERIES[1], width=2),
+                                           name="P(fail ≤30)"))
+                fig.add_hline(y=getattr(th, "high_failure_prob", 0.5), line_dash="dot", line_color=MUTED, annotation_text="HIGH rule")
+                fig.update_layout(title="Probability of failing within 30 cycles", xaxis_title="cycle",
+                                  yaxis=dict(title="probability", range=[0, 1.02], tickformat=".0%"), hovermode="x unified")
+                st.plotly_chart(style(fig, 320), width="stretch")
+
     st.subheader("Sensor trends")
     raw = fleet_raw(subset)
     eng_raw = raw[raw["engine_id"] == engine]
@@ -231,7 +266,7 @@ elif page == "Engine detail":
             st.caption("Raw readings jump between the 6 flight regimes; normalising per regime reveals the wear trend.")
 
     st.subheader("Agent decision")
-    store = WorkOrderStore(OUT / "work_orders.json")
+    store = work_order_store()
     wo = store.get(row["wo_id"]) if isinstance(row.get("wo_id"), str) else None
     if wo:
         st.markdown(render_markdown(wo))
@@ -270,7 +305,7 @@ elif page == "Work orders":
     st.title("Work orders")
     st.caption("Created automatically by the triage agent. Humans acknowledge, close or reject them; "
                "`HUMAN_REVIEW` orders are the exceptions the agent could not decide on its own.")
-    store = WorkOrderStore(OUT / "work_orders.json")
+    store = work_order_store()
     if not store.orders:
         st.info("No work orders yet.")
         st.stop()
@@ -362,7 +397,9 @@ elif page == "Model performance":
     with left:
         st.subheader("Anomaly detection")
         rows = []
-        for det in ("mahalanobis", "iforest"):
+        for det in ("mahalanobis", "iforest", "autoencoder"):
+            if f"anomaly_{det}_pr_auc" not in m:
+                continue  # model trained before this detector existed
             rows.append({"detector": det + (" ✓ selected" if det == meta["selected_detector"] else ""),
                          "PR-AUC": m.get(f"anomaly_{det}_pr_auc"), "ROC-AUC": m.get(f"anomaly_{det}_roc_auc"),
                          "recall": m.get(f"anomaly_{det}_recall"), "precision": m.get(f"anomaly_{det}_precision"),
@@ -383,6 +420,38 @@ elif page == "Model performance":
         if cal:
             st.caption(f"`high_rul` threshold calibrated on validation engines to {cal['high_rul']:.0f} cycles "
                        f"(target recall {cal['target_recall']:.0%}, achieved {cal['val_recall']:.0%}).")
+
+    calib = csv(OUT / subset / "evaluation" / "failure_prob_calibration.csv")
+    if calib is not None and "test_failure_prob_brier" in m:
+        st.subheader("Risk assessment: failure probability & health score")
+        left, right = st.columns([1, 1.3])
+        with left:
+            c = st.columns(2)
+            c[0].metric("ROC-AUC", f"{m.get('test_failure_prob_auc', float('nan')):.3f}",
+                        help="Ranks engines that fail within 30 cycles above those that don't")
+            c[1].metric("Brier score", f"{m['test_failure_prob_brier']:.3f}",
+                        help=f"Mean squared error of the probability (lower is better). Base rate "
+                             f"{m['test_failure_prob_base_rate']:.0%}")
+            c = st.columns(2)
+            c[0].metric("Calibration error (ECE)", f"{m['test_failure_prob_ece']:.3f}",
+                        help="Average gap between predicted probability and observed frequency")
+            c[1].metric("Health ↔ true RUL", f"ρ = {m['test_health_spearman_rul']:.2f}",
+                        help="Spearman rank correlation of the health score with the true remaining life")
+            rm = meta.get("risk_model", {})
+            st.caption(f"Logistic model on predicted RUL + anomaly index, fitted on {rm.get('horizon', 30)}-cycle "
+                       "labels of held-out calibration snapshots. Health = RUL share × (0.75 + 0.25 × normal-behaviour share).")
+        with right:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", line=dict(color=MUTED, dash="dash", width=1),
+                                     name="perfectly calibrated"))
+            fig.add_trace(go.Scatter(x=calib["predicted"], y=calib["observed"], mode="lines+markers",
+                                     marker=dict(size=calib["n"].clip(lower=4) ** 0.5 * 3, color=SERIES[0]),
+                                     line=dict(color=SERIES[0], width=2), name="FleetGuard",
+                                     customdata=calib["n"], hovertemplate="predicted %{x:.0%}<br>observed %{y:.0%}<br>n=%{customdata}<extra></extra>"))
+            fig.update_layout(title="Reliability curve on the test fleet (marker size = engines)",
+                              xaxis=dict(title="predicted P(fail ≤30)", tickformat=".0%", range=[0, 1]),
+                              yaxis=dict(title="observed fraction failing ≤30", tickformat=".0%", range=[0, 1.02]))
+            st.plotly_chart(style(fig, 360), width="stretch")
 
     fi = csv(OUT / subset / "evaluation" / "feature_importance.csv")
     def short_feature(f: str) -> str:  # sensor_11_mean30 -> Ps30_mean30
@@ -414,7 +483,7 @@ elif page == "Predict on new data":
 
     predict_page.render(SimpleNamespace(
         subset=subset, available=subsets, load=load_champion, fleet_raw=fleet_raw(subset),
-        out_dir=OUT, style=style, severity_badge=severity_badge, series=SERIES, muted=MUTED,
+        out_dir=OUT, store=work_order_store, style=style, severity_badge=severity_badge, series=SERIES, muted=MUTED,
     ))
 
 # ================================================================== MLOPS
@@ -473,6 +542,19 @@ elif page == "MLOps & monitoring":
                          category_orders={"severity": SEVERITY_ORDER}, title="Work orders created / escalated over time")
             fig.update_layout(bargap=0.15, xaxis_title="fleet time (cycle)")
             st.plotly_chart(style(fig, 320), width="stretch")
+
+    st.subheader("Database")
+    store = work_order_store()
+    counts = store.db.counts()
+    c = st.columns(4)
+    for col, (table, n) in zip(c, counts.items()):
+        col.metric(table.replace("_", " "), f"{n:,}")
+    runs = store.db.scoring_runs(subset)
+    if len(runs):
+        runs["severity_counts"] = runs["severity_counts"].apply(lambda j: ", ".join(f"{k} {v}" for k, v in json.loads(j).items()))
+        st.dataframe(runs.head(10), hide_index=True, width="stretch")
+    st.caption(f"SQLite file `{CFG.path('database').relative_to(ROOT).as_posix()}`: work orders with their full history, "
+               "and every scoring run with each engine's prediction, so trends can be queried with SQL.")
 
     st.subheader("Retraining")
     incoming = sorted(p.name for p in CFG.path("incoming_data").glob(f"{subset}_*"))

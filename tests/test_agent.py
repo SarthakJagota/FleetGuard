@@ -69,6 +69,11 @@ def test_work_order_lifecycle(tmp_path):
     event, wo = store.apply("FD001", AGENT.decide(state(cycle=170, rul_pred=12, rul_lower=4, rul_upper=20)), "v1")
     assert event == "ESCALATED" and wo["severity"] == "CRITICAL" and wo["priority"] == "P1" and len(store.orders) == 1
 
+    # Re-scoring the same cycle (e.g. with a newer model) refreshes evidence without a history entry.
+    n_events = len(wo["history"])
+    store.apply("FD001", AGENT.decide(state(cycle=170, rul_pred=11, rul_lower=3, rul_upper=19)), "v2")
+    assert wo["model_version"] == "v2" and wo["rul_pred"] == 11 and len(wo["history"]) == n_events
+
     # A better reading never auto-downgrades an open order.
     store.apply("FD001", AGENT.decide(state(cycle=171, rul_pred=50, rul_lower=35, rul_upper=65)), "v1")
     assert store.orders[0]["severity"] == "CRITICAL"
