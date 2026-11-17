@@ -1,0 +1,23 @@
+# Keep the build context small and free of local state.
+venv/
+.venv/
+.git/
+.github/
+**/__pycache__/
+**/*.pyc
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+notebooks/
+tests/
+docs/
+scripts/
+
+# runtime state is mounted as volumes, never baked into the image
+models/
+outputs/
+mlruns/
+mlartifacts/
+mlflow.db
+data/incoming/
+run_all.log

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# FLEETGUARD_HOME lets an installed package (e.g. in Docker) find configs/, data/, models/ ...
+PROJECT_ROOT = Path(os.environ.get("FLEETGUARD_HOME") or Path(__file__).resolve().parents[2])
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "config.yaml"
 SUBSETS = ("FD001", "FD002", "FD003", "FD004")
 
@@ -35,8 +37,9 @@ class Config:
     def tracking_uri(self) -> str:
         uri = self.raw["paths"]["mlflow_tracking_uri"]
         if uri.startswith("sqlite:///") and not Path(uri[len("sqlite:///"):]).is_absolute():
-            db = (self.root / uri[len("sqlite:///"):]).as_posix()
-            return f"sqlite:///{db}"
+            db = self.root / uri[len("sqlite:///"):]
+            db.parent.mkdir(parents=True, exist_ok=True)
+            return f"sqlite:///{db.as_posix()}"
         return uri
 
     def subset(self, name: str) -> dict[str, Any]:

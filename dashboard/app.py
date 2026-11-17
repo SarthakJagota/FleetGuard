@@ -512,7 +512,7 @@ elif page == "MLOps & monitoring":
                            "created_at", "decision"]].round(2), hide_index=True, width="stretch")
     st.caption("Champion/challenger: a retrained model is promoted only if its test RMSE is not worse than the champion's. "
                "Full experiment history (every candidate model, params, plots) is in MLflow: "
-               "`mlflow ui --backend-store-uri sqlite:///mlflow.db`, then open http://127.0.0.1:5000")
+               "`mlflow ui --backend-store-uri sqlite:///mlruns/mlflow.db`, then open http://127.0.0.1:5000 (or `docker compose up`)")
 
     left, right = st.columns(2)
     with left:

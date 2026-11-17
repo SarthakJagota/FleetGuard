@@ -77,7 +77,8 @@ The fixed interval is the *best possible* one for the engines the model was trai
 * **Work-order lifecycle.** One open order per engine, which is updated or escalated in place and never auto-downgraded. Only humans close or reject orders, and every order keeps a full history.
 * **MLOps loop.** New data in `data/incoming/` triggers a drift check (PSI), a challenger is trained and compared with the champion, then promoted or rejected. MLflow Model Registry aliases and a local versioned registry keep track of versions.
 * **Predict on new data.** Upload engine histories (CSV or NASA .txt), add a new sensor reading to an engine and watch the prediction update, or use a what-if simulator that drifts sensors and shows how the RUL and the agent react.
-* **A 70-test pytest suite** covering data, features, models, agent rules, work orders, new-data inference, and an end-to-end integration run.
+* **REST API + Docker.** A FastAPI service (`/predict`, `/predict/csv`, work-order endpoints, auto-generated docs) and a docker-compose stack that starts the API, dashboard and MLflow with one command.
+* **A 76-test pytest suite** covering data, features, models, agent rules, work orders, the REST API, new-data inference, and an end-to-end integration run.
 
 ## Quick start
 
@@ -91,7 +92,7 @@ python -m fleetguard run-all      # all four subsets, ~15-20 min on a laptop
 # python -m fleetguard run-all --subsets FD001     # one subset, ~3 min
 
 streamlit run dashboard/app.py                                  # dashboard
-mlflow ui --backend-store-uri sqlite:///mlflow.db               # experiment tracking -> http://127.0.0.1:5000
+mlflow ui --backend-store-uri sqlite:///mlruns/mlflow.db        # experiment tracking -> http://127.0.0.1:5000
 pytest                                                          # tests
 ```
 
@@ -99,6 +100,51 @@ On Windows, `.\scripts\run_demo.ps1` runs the pipeline and opens the dashboard.
 
 The NASA C-MAPSS files are expected in `data/raw/CMAPSSData/` (from
 [data.nasa.gov](https://data.nasa.gov/dataset/cmapss-jet-engine-simulated-data)).
+
+## Run with Docker
+
+One command starts the REST API, the dashboard and MLflow:
+
+```bash
+docker compose up --build -d
+```
+
+| Service | URL |
+|---|---|
+| REST API (interactive docs) | http://localhost:8000/docs |
+| Dashboard | http://localhost:8501 |
+| MLflow | http://localhost:5000 |
+
+The containers use the models, outputs and MLflow history in your project folder (mounted as volumes).
+On a fresh clone with no trained models, train inside Docker first (~20 min):
+
+```bash
+docker compose --profile train run --rm pipeline
+```
+
+`docker compose down` stops everything. The image pins the exact library versions the models were trained with,
+so a model bundle saved on the host loads identically in the container.
+
+## REST API
+
+`fleetguard serve` (or the `api` container) exposes the system over HTTP. Docs are generated automatically at `/docs`.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/health`, `/models` | status, champion model per subset with test metrics |
+| GET | `/example/{subset}` | a real engine's history, ready to send to `/predict` |
+| POST | `/predict` | sensor history (JSON) → RUL + 80% interval, health score, failure probability, severity, reasons, SHAP drivers; optional work order |
+| POST | `/predict/csv` | the same for an uploaded CSV or NASA `.txt` file |
+| GET | `/fleets/{subset}` | latest scored state of a benchmark fleet |
+| GET / PATCH | `/work-orders`, `/work-orders/{id}` | list orders; acknowledge, close or reject them |
+
+```bash
+curl "http://localhost:8000/example/FD004?engine_id=25&last_cycles=600" -o body.json
+curl -X POST http://localhost:8000/predict -H "Content-Type: application/json" --data @body.json
+```
+
+The model is chosen automatically from the data (operating regimes), e.g. `"selection_reason": "6 operating regimes
+detected -> multi-regime model (FD004)"`. A warm request with a 486-cycle history takes about 0.2 s, SHAP included.
 
 ### What `run-all` does for every subset
 
@@ -120,6 +166,7 @@ python -m fleetguard stream  --subset FD002 --step 5
 python -m fleetguard simulate-policies --subset FD002
 python -m fleetguard work-orders --status OPEN
 python -m fleetguard close WO-00012 --note "HPC washed, borescope OK"
+python -m fleetguard serve --port 8000            # REST API, docs at /docs
 # options: --no-mlflow, --fast (tiny models), --models xgboost lightgbm
 ```
 
@@ -184,12 +231,13 @@ FleetGuard/
 ├── scripts/run_demo.ps1         one-shot demo on Windows
 ├── src/fleetguard/              the package (below)
 ├── tests/                       pytest suite
+├── Dockerfile · docker-compose.yml · requirements-docker.txt (pinned)
 ├── pyproject.toml · requirements.txt · LICENSE
 │
 │   generated at runtime (git-ignored):
 ├── models/                      versioned model bundles + registry.json per subset
 ├── outputs/                     fleet scores, work orders, evaluation, monitoring
-└── mlflow.db, mlruns/           MLflow tracking store
+└── mlruns/                      MLflow tracking store (mlflow.db + artifacts)
 ```
 
 ```
@@ -211,6 +259,7 @@ src/fleetguard/
   storage.py                 SQLite: work orders, their history, scoring runs, predictions
   simulation.py              maintenance-policy simulation (reactive / fixed / FleetGuard / oracle)
   inference.py               new data: uploads, single new readings, what-if scenarios
+  api.py                     FastAPI REST service
   pipeline.py                train / retrain / score / stream / run-all
   cli.py                     command line
 ```
@@ -223,7 +272,7 @@ Design decisions, trade-offs and limitations are in **[docs/DESIGN.md](docs/DESI
 
 ## Tech stack
 
-Python · pandas · NumPy · scikit-learn · XGBoost · LightGBM · SHAP · MLflow · Streamlit · Plotly · pytest
+Python · pandas · NumPy · scikit-learn · XGBoost · LightGBM · SHAP · MLflow · FastAPI · Docker · SQLite · Streamlit · Plotly · pytest · GitHub Actions
 
 ## License
 

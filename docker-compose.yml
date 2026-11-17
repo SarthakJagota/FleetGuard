@@ -1,0 +1,55 @@
+# FleetGuard stack:  docker compose up --build
+#   API        http://localhost:8000/docs
+#   Dashboard  http://localhost:8501
+#   MLflow     http://localhost:5000
+# Ports busy? e.g. DASHBOARD_PORT=8502 docker compose up -d  (also API_PORT, MLFLOW_PORT)
+#
+# Models, outputs and MLflow history live in the project folders below (bind mounts),
+# so the stack uses whatever you trained locally. On a fresh machine, train first:
+#   docker compose --profile train run --rm pipeline        (all four subsets)
+
+x-fleetguard: &fleetguard
+  image: fleetguard:latest
+  pull_policy: never          # built locally by the api service, never pulled from a registry
+  restart: unless-stopped
+  volumes:
+    - ./models:/app/models
+    - ./outputs:/app/outputs
+    - ./mlruns:/app/mlruns
+    - ./data/incoming:/app/data/incoming
+
+services:
+  api:
+    <<: *fleetguard
+    build: .                  # the only service that builds; the others reuse the same image
+    command: ["fleetguard", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["${API_PORT:-8000}:8000"]
+
+  dashboard:
+    <<: *fleetguard
+    command: ["streamlit", "run", "dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501",
+              "--server.headless=true", "--browser.gatherUsageStats=false"]
+    ports: ["${DASHBOARD_PORT:-8501}:8501"]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+
+  mlflow:
+    <<: *fleetguard
+    command: ["mlflow", "ui", "--backend-store-uri", "sqlite:////app/mlruns/mlflow.db",
+              "--host", "0.0.0.0", "--port", "5000"]
+    ports: ["${MLFLOW_PORT:-5000}:5000"]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:5000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+
+  # One-off training job (not started by `docker compose up`).
+  pipeline:
+    <<: *fleetguard
+    profiles: ["train"]
+    restart: "no"
+    command: ["fleetguard", "run-all"]

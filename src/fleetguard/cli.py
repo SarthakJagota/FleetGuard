@@ -8,6 +8,7 @@
     fleetguard stream  --subset FD002       replay telemetry cycle by cycle
     fleetguard work-orders --status OPEN    list work orders
     fleetguard close WO-00012 --note "..."  close / reject a work order
+    fleetguard serve --port 8000            REST API, docs at http://127.0.0.1:8000/docs
 """
 
 from __future__ import annotations
@@ -54,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--subset", required=True)
     st.add_argument("--step", type=int, default=10)
 
+    sv = sub.add_parser("serve", help="start the REST API (docs at /docs)")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+
     sp = sub.add_parser("simulate-policies", help="reactive vs fixed-interval vs FleetGuard maintenance cost")
     sp.add_argument("--subset", required=True)
 
@@ -69,6 +74,16 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    if args.cmd == "serve":
+        import os
+
+        import uvicorn
+
+        if args.config:
+            os.environ["FLEETGUARD_CONFIG"] = args.config
+        uvicorn.run("fleetguard.api:app", host=args.host, port=args.port)
+        return 0
+
     cfg = load_config(args.config)
     fg = FleetGuard(cfg, track=not args.no_mlflow, fast=args.fast, candidates=args.models)
 

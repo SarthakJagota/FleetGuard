@@ -12,7 +12,7 @@ paths:
   models: models                      # versioned model bundles + registry
   outputs: outputs                    # fleet scores, work orders, reports
   database: outputs/fleetguard.db     # SQLite: work orders, their history, every scoring run
-  mlflow_tracking_uri: sqlite:///mlflow.db
+  mlflow_tracking_uri: sqlite:///mlruns/mlflow.db   # inside mlruns/ so one folder holds all MLflow state
 
 # ---------------------------------------------------------------------
 # Dataset subsets. FD002/FD004 run under 6 operating conditions, so the

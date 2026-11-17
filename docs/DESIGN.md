@@ -285,7 +285,34 @@ cycle under four policies:
   less than the best fixed interval. It sits about 25% above the oracle, which
   is the room left for better models.
 
-## 9. Known limitations and next steps
+## 9. Serving and deployment
+
+* **REST API** (`api.py`, FastAPI). It reuses exactly the same feature, model,
+  agent and work-order code as the pipeline and dashboard, so the three can
+  never disagree. `POST /predict` takes cycle-by-cycle readings for one or more
+  engines and returns, for each engine's latest cycle, the RUL with its 80%
+  interval, the health score, the failure probability, the severity with reason
+  codes, sensor deviations and SHAP drivers. It can optionally create or update
+  work orders. The model is picked automatically from the data (number of
+  operating regimes), and a mismatching manual choice is flagged. Request and
+  response schemas are Pydantic models, so `/docs` is generated automatically
+  and invalid input gets a clear 422 error. Model bundles are cached and
+  reloaded automatically after a promotion. A warm request with a 486-cycle
+  history takes about 0.2 s, SHAP included.
+* **Docker.** One image runs every role, chosen by its command: API, Streamlit
+  dashboard, MLflow UI and the training pipeline. `docker-compose.yml` starts
+  the first three, and the pipeline is an opt-in `train` profile. Models,
+  outputs and MLflow state are bind-mounted from the project folder, so the
+  stack serves whatever was trained locally. The image pins the exact library
+  versions the models were trained with, which matters because model bundles
+  are pickles; the container's predictions were verified to be identical to the
+  host's. MLflow keeps its SQLite database inside `mlruns/` because Docker
+  cannot reliably bind-mount a single file that may not exist yet. The image
+  runs as a non-root user, has a health check, and is about 640 MB.
+* **CI** builds the image, trains a tiny model inside it, starts the API and
+  sends a real prediction request on every push.
+
+## 10. Known limitations and next steps
 
 * C-MAPSS is simulated. The physical component mapping in work orders is a
   heuristic, not a diagnosis.

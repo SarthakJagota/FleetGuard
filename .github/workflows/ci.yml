@@ -22,3 +22,19 @@ jobs:
         run: pytest
       - name: Pipeline smoke test (tiny models, no MLflow)
         run: python -m fleetguard --fast --no-mlflow run-all --subsets FD001
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t fleetguard:ci .
+      - name: Train a tiny model and start the API inside the image
+        run: |
+          docker volume create fg_models && docker volume create fg_outputs
+          docker run --rm -v fg_models:/app/models -v fg_outputs:/app/outputs fleetguard:ci \
+            fleetguard --fast --no-mlflow run-all --subsets FD001
+          docker run -d --name api -p 8000:8000 -v fg_models:/app/models -v fg_outputs:/app/outputs fleetguard:ci
+          for i in $(seq 1 30); do curl -fs http://localhost:8000/health && break; sleep 2; done
+          curl -fs "http://localhost:8000/example/FD001?engine_id=31" -o body.json
+          curl -fs -X POST http://localhost:8000/predict -H "Content-Type: application/json" --data @body.json
