@@ -228,19 +228,29 @@ class FleetGuard:
         subset = subset.upper()
         bundle = self.registry(subset).load()
         data = load_subset(self.cfg.path("raw_data"), subset)
-        hist, feats, _ = score_history(bundle, data["test"])
+        from .data.loader import add_test_rul
+
+        # True RUL is attached only for display in the replay; the agent never sees it.
+        hist, feats, _ = score_history(bundle, add_test_rul(data["test"], data["test_rul"]))
         out = self.out_dir(subset)
         store_path = out / "stream_work_orders.json"
         if store_path.exists():
             store_path.unlink()
         store = WorkOrderStore(store_path)
-        events = []
+        events, states = [], []
+        # End-aligned fleet clock: every engine's last reading is "now" (the final tick), as in a
+        # real fleet where all engines report up to the present at different ages. Engines with
+        # short histories therefore join the fleet later instead of going silent early.
         last_cycle = hist.groupby("engine_id")["cycle"].transform("max")
-        max_tick = int(hist["cycle"].max())
-        for tick in list(range(step, max_tick, step)) + [max_tick]:
-            # Engines whose telemetry ends before this tick have stopped reporting; skip them.
-            at_tick = hist[(hist["cycle"] == np.minimum(tick, last_cycle)) & (last_cycle >= tick - step + 1)]
-            for d in triage_rows(bundle, hist, feats, at_tick.index):
+        now = int(last_cycle.max())
+        fleet_time = hist["cycle"] + (now - last_cycle)
+        ticks = list(range(step, now, step)) + [now]
+        for tick in ticks:
+            at_tick = hist[fleet_time == tick]
+            for d, i in zip(triage_rows(bundle, hist, feats, at_tick.index, explain=False), at_tick.index):
+                states.append({"tick": tick, "engine_id": d.engine_id, "cycle": d.cycle, "severity": d.severity,
+                               "rul_pred": d.rul_pred, "health_score": d.health_score, "failure_prob": d.failure_prob,
+                               "true_rul": int(hist.at[i, "rul"]), "joined_tick": int(now - last_cycle.at[i] + 1)})
                 event, wo = store.apply(subset, d, bundle["version"])
                 if event in ("CREATED", "ESCALATED"):
                     events.append({"tick": tick, "engine_id": d.engine_id, "event": event, "severity": d.severity,
@@ -248,9 +258,55 @@ class FleetGuard:
         store.save()
         ev = pd.DataFrame(events, columns=["tick", "engine_id", "event", "severity", "rul_pred", "wo_id", "reasons"])
         ev.to_csv(out / "stream_events.csv", index=False)
+        pd.DataFrame(states).to_csv(out / "stream_states.csv.gz", index=False, compression="gzip")
         log.info("[%s] stream replay: %d ticks, %d created/escalated events, %d work orders",
-                 subset, len(range(step, max_tick, step)) + 1, len(ev), len(store.orders))
+                 subset, len(ticks), len(ev), len(store.orders))
         return ev
+
+    # ------------------------------------------------------- policy simulation
+    def simulate_policies(self, subset: str) -> dict:
+        """Reactive vs fixed-interval vs FleetGuard vs oracle maintenance, on engines the model never saw."""
+        from . import simulation
+
+        subset = subset.upper()
+        reg = self.registry(subset)
+        data = load_subset(self.cfg.path("raw_data"), subset)
+        manifest = self._manifest(subset)
+        archive = self.cfg.path("incoming_data") / "archive"
+        versions = [v["version"] for v in reg.versions()]
+        if manifest["ingested"] and "v1" in versions and manifest["base_engines"]:
+            # v1 never saw the retraining batch: a clean, out-of-sample replay.
+            bundle = reg.load("v1")
+            batches = [read_cmapss_file(archive / n) if not n.endswith(".csv") else pd.read_csv(archive / n)[RAW_COLS]
+                       for n in manifest["ingested"]]
+            eval_raw = batches[0]
+            for b in batches[1:]:
+                eval_raw = merge_batches(eval_raw, b)
+            train_raw = data["train"][data["train"]["engine_id"].isin(manifest["base_engines"])]
+            source = (f"model v1 replayed on {eval_raw['engine_id'].nunique()} engines from "
+                      f"{', '.join(manifest['ingested'])}, which it was never trained on")
+        else:
+            bundle = reg.load()
+            train_raw, _ = self._training_data(subset, data, manifest)
+            fit_ids, val_ids = split_engines(train_raw["engine_id"].unique(), self.cfg["data"]["validation_fraction"],
+                                             self.cfg["seed"])
+            eval_raw = train_raw[train_raw["engine_id"].isin(val_ids)]
+            train_raw = train_raw[train_raw["engine_id"].isin(fit_ids)]
+            source = (f"champion {bundle['version']} on its {len(val_ids)} validation engines (not trained on, but used "
+                      "for early stopping and calibration, so slightly optimistic)")
+        s_cfg = self.cfg.get("simulation", {})
+        costs = simulation.Costs(service=s_cfg.get("service_cost", 1.0), failure=s_cfg.get("failure_cost", 10.0),
+                                 planning_delay=s_cfg.get("planning_delay", 5))
+        train_life = train_raw.groupby("engine_id")["cycle"].max().to_numpy()
+        ratios = tuple(s_cfg.get("cost_ratios", (2, 5, 10, 20, 50)))
+        result = simulation.simulate(bundle, eval_raw, train_life, costs, ratios)
+        meta = {"subset": subset, "model_version": bundle["version"], "evaluation_source": source,
+                "costs": costs.__dict__}
+        simulation.save(result, self.out_dir(subset) / "simulation", meta)
+        h = result["headline"]
+        log.info("[%s] policy simulation: FleetGuard saves %.0f%% vs fixed interval (%d cycles), %.0f%% vs reactive",
+                 subset, h["saving_vs_fixed_pct"], h["fixed_interval"], h["saving_vs_reactive_pct"])
+        return {**meta, "headline": h, "policies": result["policies"]}
 
     # ------------------------------------------------------------- run all
     def run_all(self, subsets, fresh: bool = True, stream_step: int = 10) -> dict:
@@ -268,6 +324,7 @@ class FleetGuard:
             second = self.retrain(subset)
             fleet = self.score(subset)
             ev = self.stream(subset, step=stream_step)
+            sim = self.simulate_policies(subset)
             champion = self.registry(subset).load()
             summary[subset] = {
                 "v1": {"decision": first["decision"], "test_rmse": first["metrics"]["test_rmse"]},
@@ -279,6 +336,7 @@ class FleetGuard:
                     "agent_recall_near_failure", "agent_false_alarm_rate", "agent_missed_critical")},
                 "severity_counts": fleet["severity"].value_counts().to_dict(),
                 "stream_events": int(len(ev)),
+                "policy_simulation": {**sim["headline"], "fleetguard": sim["policies"]["fleetguard"]},
                 "seconds": round(time.time() - t0, 1),
             }
         path = self.cfg.path("outputs") / "summary.json"

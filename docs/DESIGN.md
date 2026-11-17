@@ -239,7 +239,53 @@ rule wins:
   alarm rate, data-quality report, and the PSI of every input feature against
   training. The dashboard shows these together with the version history.
 
-## 8. Known limitations and next steps
+## 8. Simulation
+
+**Live fleet replay.** The test fleet's telemetry is replayed tick by tick
+(`fleetguard stream`). The clock is **end-aligned**: every engine's last
+reading lands on the final tick ("now"), as in a real fleet where all engines
+report up to the present but at different ages. Engines with short histories
+therefore join the fleet later; they don't go silent early. (NASA cut each
+test engine's data at a random point, so a start-aligned clock made engines
+disappear one by one, which no real fleet does.) At every tick the agent
+decides for each engine, and the work-order store creates, updates or
+escalates orders exactly as in production. The final tick matches the Fleet
+overview page. Each engine's state per tick is saved, so the
+dashboard can play the fleet forward and show the work-order feed. True RUL is
+attached only for display; the agent never sees it.
+
+**Maintenance-policy simulation** (`simulation.py`). This answers the business
+question behind the case study: *is predictive maintenance actually better than
+what fleets do today?* Engines with known failure times are replayed cycle by
+cycle under four policies:
+
+| Policy | Service happens |
+|---|---|
+| Reactive | never: the engine runs until it fails |
+| Fixed interval | every N cycles, whatever the condition |
+| FleetGuard | when the agent raises a CRITICAL/HIGH order, plus a 5-cycle planning delay |
+| Oracle | one cycle before the true failure (theoretical best) |
+
+* **Cost per 1,000 operating cycles** (a renewal argument). Each engine life
+  ends in a planned service (cost 1) or an unplanned failure (cost 10). Dividing
+  by cycles operated means servicing too early is penalised automatically: the
+  fleet would need more services over time.
+* **No leakage.** The engines are the retraining batch, scored by **model v1**,
+  which was trained before that batch arrived. If no batch exists, the
+  champion's validation engines are used and the report says it is slightly
+  optimistic.
+* **A strong baseline.** The fixed interval is the one with the lowest cost on
+  the engines v1 was trained on, which is the best a fixed schedule could do,
+  not a strawman.
+* **Assumptions are swept.** The failure:service cost ratio is unknown, so
+  results are reported for 2×, 5×, 10×, 20× and 50×. FleetGuard beats the best
+  fixed interval at every ratio, on every subset.
+* **Result.** FleetGuard prevented every failure on all four subsets, used
+  about 77-80% of each engine's life (fixed interval: 53-62%), and cost 25-36%
+  less than the best fixed interval. It sits about 25% above the oracle, which
+  is the room left for better models.
+
+## 9. Known limitations and next steps
 
 * C-MAPSS is simulated. The physical component mapping in work orders is a
   heuristic, not a diagnosis.

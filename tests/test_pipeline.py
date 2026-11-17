@@ -55,5 +55,15 @@ def test_closed_loop_end_to_end(tmp_cfg):
     # Streaming replay produces work orders over time with escalations.
     events = fg.stream("FD001", step=25)
     assert len(events) > 0 and "CREATED" in set(events["event"])
+    states = pd.read_csv(out / "stream_states.csv.gz")
+    assert {"tick", "engine_id", "severity", "rul_pred", "true_rul", "joined_tick"} <= set(states.columns)
+    final = states[states["tick"] == states["tick"].max()]
+    assert final["engine_id"].nunique() == 100            # end-aligned: every engine reports at "now"
+
+    # Policy simulation runs on the retraining batch with model v1 (never trained on it).
+    sim = fg.simulate_policies("FD001")
+    assert "never trained on" in sim["evaluation_source"] and sim["model_version"] == "v1"
+    assert (out / "simulation" / "policy_summary.json").exists()
+
     monitoring = json.loads((out / "monitoring.json").read_text())
     assert monitoring["engines"] == 100

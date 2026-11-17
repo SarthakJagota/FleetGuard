@@ -46,6 +46,17 @@ apart, so that column is larger. It is the one to use when comparing with papers
 | FD003 | 1.000 | 0.013 | 0.043 | 0.94 |
 | FD004 | 0.994 | 0.026 | 0.033 | 0.93 |
 
+**Maintenance-policy simulation** (engines the model never saw; cost per 1,000 operating cycles, failure = 10× a planned service):
+
+| Subset | Engines | Reactive | Best fixed interval | **FleetGuard** | Oracle | Failures with FleetGuard | Saving vs fixed | Useful life used (FleetGuard vs fixed) |
+|---|---|---|---|---|---|---|---|---|
+| FD001 | 30 | 45.9 | 7.9 (every 127) | **5.9** | 4.6 | 0 | **25%** | 77% vs 58% |
+| FD002 | 78 | 48.5 | 8.7 (every 128) | **6.1** | 4.9 | 0 | **30%** | 79% vs 62% |
+| FD003 | 30 | 37.0 | 6.9 (every 144) | **4.6** | 3.7 | 0 | **34%** | 80% vs 53% |
+| FD004 | 75 | 43.0 | 8.6 (every 130) | **5.5** | 4.3 | 0 | **36%** | 78% vs 56% |
+
+The fixed interval is the *best possible* one for the engines the model was trained on, and FleetGuard still beats it at every failure-cost ratio tested (2× to 50×). The costs are assumptions and C-MAPSS is simulated, so these are relative, not real, savings.
+
 * **RMSE / MAE** in cycles. **NASA score** is the PHM08 asymmetric score (late predictions cost more; lower is better).
 * **Coverage** is the share of test engines whose true RUL falls inside the 80% conformal interval.
 * **Agent recall** is the share of engines truly ≤ 30 cycles from failure that got a work order or human review. **False alarms** is the share of engines with > 90 cycles left that got a maintenance order. **Missed** is the number of engines ≤ 15 cycles from failure left without action.
@@ -60,11 +71,13 @@ apart, so that column is larger. It is the one to use when comparing with papers
 * **Three anomaly detectors** (Mahalanobis, Isolation Forest, and a neural-network autoencoder), trained only on healthy data. Their thresholds are set from healthy validation engines, alarms require persistence, and the detectors are compared by PR-AUC and lead time.
 * **SHAP explanations in every work order.** The 3 sensors that pulled the predicted RUL down, in cycles (e.g. "phi −9 cycles"), shown next to the sensor-deviation evidence.
 * **SQLite storage.** Work orders with their full history, and every scoring run with each engine's prediction, queryable with SQL; the dashboard and pipeline write safely side by side.
+* **Maintenance-policy simulation.** On engines the model never saw, FleetGuard prevented every failure and cost 25-36% less than the best fixed service interval, using about 78% of each engine's life instead of about 57%.
+* **Live fleet replay.** A dashboard page plays the fleet forward in time: engine tiles change colour and a work-order feed shows orders being created and escalated.
 * **Triage agent with no LLM.** Ordered rules with reason codes. The *high* threshold is **calibrated** on validation data to reach 95% recall, the agent is uncertainty-aware (it uses the interval's lower bound), and it sends exceptions (bad data, disagreeing models, huge uncertainty) to humans.
 * **Work-order lifecycle.** One open order per engine, which is updated or escalated in place and never auto-downgraded. Only humans close or reject orders, and every order keeps a full history.
 * **MLOps loop.** New data in `data/incoming/` triggers a drift check (PSI), a challenger is trained and compared with the champion, then promoted or rejected. MLflow Model Registry aliases and a local versioned registry keep track of versions.
 * **Predict on new data.** Upload engine histories (CSV or NASA .txt), add a new sensor reading to an engine and watch the prediction update, or use a what-if simulator that drifts sensors and shows how the RUL and the agent react.
-* **A 66-test pytest suite** covering data, features, models, agent rules, work orders, new-data inference, and an end-to-end integration run.
+* **A 70-test pytest suite** covering data, features, models, agent rules, work orders, new-data inference, and an end-to-end integration run.
 
 ## Quick start
 
@@ -94,6 +107,7 @@ The NASA C-MAPSS files are expected in `data/raw/CMAPSSData/` (from
 3. **Retrain**: drift check of the batch, train v2 on all engines, compare it with v1, then promote or reject.
 4. **Score the fleet** (the official test engines). The agent decides for each engine and work orders are stored in a SQLite database (`outputs/fleetguard.db`) and also written as Markdown files, and the scoring run with every engine's prediction is recorded.
 5. **Streaming replay**: the test fleet is replayed cycle by cycle, and work orders appear and escalate over time.
+6. **Policy simulation**: v1 is replayed on the batch it never saw, comparing run-to-failure, the best fixed interval, FleetGuard and a perfect-knowledge oracle on maintenance cost.
 
 ### Individual commands
 
@@ -103,6 +117,7 @@ python -m fleetguard simulate-arrival --subset FD002
 python -m fleetguard retrain --subset FD002          # skipped if data/incoming is empty
 python -m fleetguard score   --subset FD002
 python -m fleetguard stream  --subset FD002 --step 5
+python -m fleetguard simulate-policies --subset FD002
 python -m fleetguard work-orders --status OPEN
 python -m fleetguard close WO-00012 --note "HPC washed, borescope OK"
 # options: --no-mlflow, --fast (tiny models), --models xgboost lightgbm
@@ -151,6 +166,7 @@ python -m fleetguard close WO-00012 --note "HPC washed, borescope OK"
 | Fleet overview | severity counts, RUL distribution against the agent thresholds, sortable fleet table with intervals, anomaly index and fired rules, and a re-score button |
 | Engine detail | RUL trajectory with 80% band against the true RUL, anomaly score with alarms, raw vs regime-normalised sensor trends, the agent's decision and work order, and SHAP contributions per sensor |
 | Predict on new data | **Model chosen automatically** (counts operating regimes: 1 → FD003/FD001 model, several → FD004/FD002; NASA engines use their own fleet's model; manual override with a mismatch warning) · **Upload** engine histories → predictions, data-quality report, CSV download, optional work orders · **Add a reading**: enter the next cycle's sensor values for an engine and see RUL and triage update · **What-if simulator**: drift sensors (in SDs, with presets such as HPC or fan degradation) and compare the scenario with the original |
+| Simulation | **Live fleet replay** (play button and time slider: engine tiles change colour, live work-order feed, severity counts over time) · **Maintenance policies** (cost of reactive vs best fixed interval vs FleetGuard vs oracle, savings across cost ratios, when each engine is serviced vs when it would have failed) |
 | Work orders | filter, open, acknowledge, close or reject with notes (human in the loop), with full history |
 | Model performance | test metrics, predicted vs true scatter with intervals coloured by severity, error by RUL range, model comparison, anomaly-detector comparison, agent metrics, feature importance |
 | MLOps & monitoring | registry versions and promotion decisions, RMSE by version, drift on new data and on the live fleet (PSI), data quality, streaming timeline, a retrain button |
@@ -162,7 +178,7 @@ FleetGuard/
 ├── .github/workflows/ci.yml     tests + pipeline smoke test on every push
 ├── configs/config.yaml          every threshold and hyper-parameter
 ├── data/                        NASA C-MAPSS raw files (see data/README.md); incoming/ for new batches
-├── dashboard/                   Streamlit dashboard (app.py + predict_page.py)
+├── dashboard/                   Streamlit dashboard (app.py, predict_page.py, simulation_page.py)
 ├── docs/DESIGN.md               design decisions and trade-offs
 ├── notebooks/                   exploratory analysis built on the package
 ├── scripts/run_demo.ps1         one-shot demo on Windows
@@ -193,6 +209,7 @@ src/fleetguard/
   scoring.py                 fleet scoring -> agent -> work orders
   explain.py                 SHAP explanations summarised per sensor
   storage.py                 SQLite: work orders, their history, scoring runs, predictions
+  simulation.py              maintenance-policy simulation (reactive / fixed / FleetGuard / oracle)
   inference.py               new data: uploads, single new readings, what-if scenarios
   pipeline.py                train / retrain / score / stream / run-all
   cli.py                     command line

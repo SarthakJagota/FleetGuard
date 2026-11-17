@@ -83,8 +83,10 @@ def available_subsets() -> list[str]:
 
 
 def style(fig: go.Figure, height: int = 360) -> go.Figure:
-    fig.update_layout(height=height, margin=dict(l=10, r=10, t=40, b=10), legend_title_text="")
-    fig.update_xaxes(showgrid=False)
+    # Margins leave room for axis titles and tick labels (10 px clipped them).
+    fig.update_layout(height=height, margin=dict(l=70, r=20, t=50, b=60), legend_title_text="")
+    fig.update_xaxes(showgrid=False, automargin=True)
+    fig.update_yaxes(automargin=True)
     return fig
 
 
@@ -106,8 +108,8 @@ if not subsets:
 subset = st.sidebar.selectbox("Fleet (dataset subset)", subsets, help=(
     "FD001: 1 operating condition, 1 fault · FD002: 6 conditions, 1 fault · "
     "FD003: 1 condition, 2 faults · FD004: 6 conditions, 2 faults"))
-page = st.sidebar.radio("Page", ["Fleet overview", "Engine detail", "Predict on new data", "Work orders",
-                                 "Model performance", "MLOps & monitoring"])
+page = st.sidebar.radio("Page", ["Fleet overview", "Engine detail", "Predict on new data", "Simulation",
+                                 "Work orders", "Model performance", "MLOps & monitoring"])
 
 registry = ModelRegistry(MODELS, subset)
 champion = registry.champion
@@ -444,9 +446,10 @@ elif page == "Model performance":
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", line=dict(color=MUTED, dash="dash", width=1),
                                      name="perfectly calibrated"))
-            fig.add_trace(go.Scatter(x=calib["predicted"], y=calib["observed"], mode="lines+markers",
-                                     marker=dict(size=calib["n"].clip(lower=4) ** 0.5 * 3, color=SERIES[0]),
-                                     line=dict(color=SERIES[0], width=2), name="FleetGuard",
+            # Markers only: some bins hold 1-2 engines, so a connecting line would suggest a pattern that isn't there.
+            fig.add_trace(go.Scatter(x=calib["predicted"], y=calib["observed"], mode="markers",
+                                     marker=dict(size=calib["n"].clip(lower=4) ** 0.5 * 3, color=SERIES[0],
+                                                 line=dict(width=1, color="white")), name="FleetGuard",
                                      customdata=calib["n"], hovertemplate="predicted %{x:.0%}<br>observed %{y:.0%}<br>n=%{customdata}<extra></extra>"))
             fig.update_layout(title="Reliability curve on the test fleet (marker size = engines)",
                               xaxis=dict(title="predicted P(fail ≤30)", tickformat=".0%", range=[0, 1]),
@@ -486,6 +489,17 @@ elif page == "Predict on new data":
         out_dir=OUT, store=work_order_store, style=style, severity_badge=severity_badge, series=SERIES, muted=MUTED,
     ))
 
+# ================================================================== SIMULATION
+elif page == "Simulation":
+    from types import SimpleNamespace
+
+    import simulation_page
+
+    simulation_page.render(SimpleNamespace(
+        subset=subset, out_dir=OUT / subset, style=style, severity_badge=severity_badge,
+        colors=SEVERITY_COLORS, series=SERIES, muted=MUTED,
+    ))
+
 # ================================================================== MLOPS
 elif page == "MLOps & monitoring":
     st.title(f"MLOps & monitoring · {subset}")
@@ -503,7 +517,7 @@ elif page == "MLOps & monitoring":
     left, right = st.columns(2)
     with left:
         fig = px.line(versions, x="version", y="test_rmse", markers=True, title="Test RMSE by model version",
-                      color_discrete_sequence=[SERIES[0]])
+                      color_discrete_sequence=[SERIES[0]], labels={"test_rmse": "test RMSE (cycles)", "version": "model version"})
         fig.update_traces(line_width=2, marker_size=9)
         st.plotly_chart(style(fig, 320), width="stretch")
     with right:

@@ -77,6 +77,17 @@ risk:
   health_rul_weight: 0.75     # health = 100 * (w * RUL part + (1 - w) * anomaly part)
   high_failure_prob: 0.5      # triage: probability at/above this -> HIGH
 
+# ---------------------------------------------------------------------
+# Maintenance-policy simulation (reactive vs fixed interval vs FleetGuard).
+# Costs are relative assumptions: a planned service costs 1, an unplanned
+# failure costs `failure_cost` (repair + downtime + secondary damage).
+# ---------------------------------------------------------------------
+simulation:
+  service_cost: 1.0
+  failure_cost: 10.0
+  planning_delay: 5           # cycles between the work order and the service
+  cost_ratios: [2, 5, 10, 20, 50]
+
 retraining:
   initial_engine_fraction: 0.7   # demo: v1 sees 70% of engines, rest arrive later
   promotion_tolerance: 0.0       # challenger must not be worse by more than this RMSE

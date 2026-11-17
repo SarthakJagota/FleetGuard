@@ -54,6 +54,9 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--subset", required=True)
     st.add_argument("--step", type=int, default=10)
 
+    sp = sub.add_parser("simulate-policies", help="reactive vs fixed-interval vs FleetGuard maintenance cost")
+    sp.add_argument("--subset", required=True)
+
     wl = sub.add_parser("work-orders", help="list work orders")
     wl.add_argument("--subset")
     wl.add_argument("--status")
@@ -86,6 +89,16 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "stream":
         ev = fg.stream(args.subset, step=args.step)
         print(ev.groupby(["event", "severity"]).size().to_string())
+    elif args.cmd == "simulate-policies":
+        res = fg.simulate_policies(args.subset)
+        print(f"Evaluated on: {res['evaluation_source']}")
+        print(f"{'policy':<12}{'failures':>9}{'prevented':>11}{'wasted cyc':>11}{'life used':>10}{'cost/1k cyc':>12}")
+        for name, m in res["policies"].items():
+            print(f"{name:<12}{m['failures']:>9}{m['failures_prevented_pct']:>10.0f}%{m['mean_wasted_cycles']:>11.1f}"
+                  f"{m['useful_life_used_pct']:>9.0f}%{m['cost_per_1000_cycles']:>12.2f}")
+        h = res["headline"]
+        print(f"FleetGuard saves {h['saving_vs_fixed_pct']:.0f}% vs the best fixed interval ({h['fixed_interval']} cycles) "
+              f"and {h['saving_vs_reactive_pct']:.0f}% vs reactive; {h['gap_to_oracle_pct']:.0f}% above the oracle.")
     elif args.cmd in ("work-orders", "close"):
         store = fg.work_orders()
         if args.cmd == "close":
