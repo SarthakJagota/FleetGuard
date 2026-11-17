@@ -27,6 +27,7 @@ RUN pip install --no-deps .
 
 COPY configs ./configs
 COPY dashboard ./dashboard
+COPY .streamlit ./.streamlit
 COPY data/raw ./data/raw
 
 # Run as an unprivileged user; state folders are mounted as volumes.

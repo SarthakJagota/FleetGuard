@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,8 @@ version = "1.0.0"
 description = "Closed-loop predictive maintenance: RUL prediction, anomaly detection, rule-based triage agent and MLOps on NASA C-MAPSS"
 readme = "README.md"
 requires-python = ">=3.10"
+authors = [{ name = "Sarthak Jagota" }]
+license = "MIT"
 dependencies = [
     "numpy>=1.26",
     "pandas>=2.1",

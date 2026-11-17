@@ -101,8 +101,9 @@ def _render_tick(ctx, slots, states, events, engines, counts, tick):
     c = snap["severity"].value_counts()
     with slots["metrics"].container():
         cols = st.columns(6)
-        cols[0].metric("Fleet time", f"{tick} / {states['tick'].max()}", "now" if tick == states["tick"].max() else None,
-                       delta_color="off")
+        cols[0].metric("Fleet time", f"{tick} / {states['tick'].max()}")
+        if tick == states["tick"].max():
+            cols[0].caption("now")
         for col, sev in zip(cols[1:], SEVERITIES):
             col.metric(ctx.severity_badge(sev), int(c.get(sev, 0)))
     slots["grid"].plotly_chart(_grid(ctx, snap, engines, tick), width="stretch", key=f"grid_{tick}_{time.time()}")
@@ -177,10 +178,10 @@ def _policies(ctx) -> None:
     c = st.columns(4)
     c[0].metric("Saving vs best fixed interval", f"{h['saving_vs_fixed_pct']:.0f}%")
     c[1].metric("Saving vs run-to-failure", f"{h['saving_vs_reactive_pct']:.0f}%")
-    c[2].metric("Failures prevented", f"{pol['fleetguard']['failures_prevented_pct']:.0f}%",
-                f"{pol['fleetguard']['failures']} of {pol['fleetguard']['engines']} failed", delta_color="off")
-    c[3].metric("Useful life used", f"{pol['fleetguard']['useful_life_used_pct']:.0f}%",
-                f"vs {pol['fixed']['useful_life_used_pct']:.0f}% with fixed interval", delta_color="off")
+    c[2].metric("Failures prevented", f"{pol['fleetguard']['failures_prevented_pct']:.0f}%")
+    c[2].caption(f"{pol['fleetguard']['failures']} of {pol['fleetguard']['engines']} engines failed")
+    c[3].metric("Useful life used", f"{pol['fleetguard']['useful_life_used_pct']:.0f}%")
+    c[3].caption(f"vs {pol['fixed']['useful_life_used_pct']:.0f}% with the fixed interval")
 
     left, right = st.columns(2)
     with left:
@@ -210,7 +211,8 @@ def _policy_colors(ctx) -> dict:
 def cost_figure(ctx, pol: dict) -> go.Figure:
     colors = _policy_colors(ctx)
     vals = [pol[p]["cost_per_1000_cycles"] for p in POLICY_ORDER]
-    fig = go.Figure(go.Bar(x=[POLICY_LABELS[p] for p in POLICY_ORDER], y=vals,
+    short = {"reactive": "Run to failure", "fixed": "Fixed interval", "fleetguard": "FleetGuard", "oracle": "Oracle"}
+    fig = go.Figure(go.Bar(x=[short[p] for p in POLICY_ORDER], y=vals,
                            marker_color=[colors[p] for p in POLICY_ORDER],
                            text=[f"{v:.1f}" for v in vals], textposition="outside", marker_cornerradius=4))
     fig.update_layout(title="Maintenance cost per 1,000 operating cycles (lower is better)",

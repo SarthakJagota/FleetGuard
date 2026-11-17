@@ -62,6 +62,12 @@ def js(path: Path):
     return read_json(str(path), mtime(path)) if path.exists() else None
 
 
+def wo_markdown(wo: dict) -> str:
+    """Work order as Markdown, with headings scaled down to fit inside a dashboard page."""
+    md = render_markdown(wo)
+    return "### " + md[2:].replace("\n## ", "\n#### ") if md.startswith("# ") else md
+
+
 def work_order_store() -> WorkOrderStore:
     """Work orders live in SQLite; an older work_orders.json is imported once."""
     return WorkOrderStore(CFG.path("database"), import_json=OUT / "work_orders.json")
@@ -190,17 +196,18 @@ elif page == "Engine detail":
     bundle = bundle_for(subset, champion)
     th = bundle["thresholds"]
 
-    c = st.columns(7)
+    c = st.columns(4)
     c[0].metric("Triage", severity_badge(row["severity"]))
+    c[1].metric("Predicted RUL", f"{row['rul_pred']:.0f} cycles")
+    c[2].metric("80% interval", f"{row['rul_lower']:.0f} – {row['rul_upper']:.0f} cycles")
+    c[3].metric("True RUL (benchmark)", f"{int(row['true_rul'])} cycles", help="Known only because this is benchmark data")
+    c = st.columns(4)
     if pd.notna(row.get("health_score")):
-        c[5].metric("Health score", f"{row['health_score']:.0f} / 100", row.get("health_band"), delta_color="off")
+        c[0].metric("Health score", f"{row['health_score']:.0f} / 100 · {row.get('health_band')}")
     if pd.notna(row.get("failure_prob")):
-        c[6].metric("P(fail ≤30 cycles)", f"{row['failure_prob']:.0%}")
-    c[1].metric("Predicted RUL", f"{row['rul_pred']:.0f} cycles", help="80% interval below")
-    c[2].metric("80% interval", f"{row['rul_lower']:.0f} – {row['rul_upper']:.0f}")
-    c[3].metric("True RUL (benchmark)", int(row["true_rul"]))
-    c[4].metric("Anomaly index", f"{row['anomaly_index']:.2f}", "alarm" if row["anomaly_alarm"] else "normal",
-                delta_color="inverse" if row["anomaly_alarm"] else "off")
+        c[1].metric("P(fail within 30 cycles)", f"{row['failure_prob']:.0%}")
+    c[2].metric("Anomaly index", f"{row['anomaly_index']:.2f}", help="Score ÷ alarm threshold; above 1 = abnormal")
+    c[3].metric("Persistent anomaly alarm", "yes" if row["anomaly_alarm"] else "no")
 
     left, right = st.columns(2)
     with left:
@@ -271,7 +278,7 @@ elif page == "Engine detail":
     store = work_order_store()
     wo = store.get(row["wo_id"]) if isinstance(row.get("wo_id"), str) else None
     if wo:
-        st.markdown(render_markdown(wo))
+        st.markdown(wo_markdown(wo))
     else:
         st.success(f"{severity_badge(row['severity'])} — {row['action']}  \nRules fired: `{row['reason_codes']}`")
 
@@ -334,13 +341,13 @@ elif page == "Work orders":
         wo = store.get(wo_id)
         left, right = st.columns([2, 1])
         with left:
-            st.markdown(render_markdown(wo))
+            st.markdown(wo_markdown(wo))
         with right:
             st.markdown("#### Engineer actions")
             note = st.text_input("Note", placeholder="e.g. borescope done, compressor washed")
-            b1, b2, b3 = st.columns(3)
-            for btn, status in [(b1, "ACKNOWLEDGED"), (b2, "CLOSED"), (b3, "REJECTED")]:
-                if btn.button(status.title(), key=status, width="stretch"):
+            for status, label in [("ACKNOWLEDGED", "Acknowledge"), ("CLOSED", "Close (work done)"),
+                                  ("REJECTED", "Reject (not needed)")]:
+                if st.button(label, key=status, width="stretch"):
                     store.set_status(wo_id, status, note, by="dashboard")
                     store.save()
                     st.rerun()

@@ -1,0 +1,10 @@
+# Streamlit settings for the FleetGuard dashboard.
+[client]
+toolbarMode = "viewer"        # hide developer-only menu items such as "Deploy"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
