@@ -17,4 +17,5 @@ __pycache__/
 /mlruns/
 /mlartifacts/
 /run_all.log
+*.mp4
 
