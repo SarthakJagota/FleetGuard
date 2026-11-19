@@ -1,6 +1,6 @@
 # FleetGuard: closed-loop predictive maintenance
 
-[![Demo Video](https://img.shields.io/badge/Demo_Video-Watch_Walkthrough-blue?style=for-the-badge&logo=google-drive)](https://drive.google.com/file/d/1_pbWPsYn9Hj-I9DSARySG2GQv0NJ9l78/view?usp=sharing)
+[![Demo Video](https://img.shields.io/badge/Demo_Video-Watch_Walkthrough-blue?style=for-the-badge&logo=google-drive)](https://drive.google.com/file/d/1Wt7d5tvgd0an5yfNVBO17AuZ33Dtt1Jt/view?usp=sharing)
 
 FleetGuard reads engine sensor telemetry, cleans it, and detects early
 degradation. It predicts each engine's **Remaining Useful Life (RUL)** with a
@@ -24,7 +24,7 @@ sensor data ─► validate & repair ─► regime normalisation ─► rolling 
 ![Live fleet replay: engines join the fleet, degrade, and the triage agent raises work orders](docs/images/fleet_replay.gif)
 
 *Live fleet replay: every engine reports up to "now"; tiles turn from healthy green to high/critical as engines
-degrade, and the work-order feed shows the agent creating and escalating orders. **[Watch the full demo video on Google Drive](https://drive.google.com/file/d/1_pbWPsYn9Hj-I9DSARySG2GQv0NJ9l78/view?usp=sharing)**.*
+degrade, and the work-order feed shows the agent creating and escalating orders. **[Watch the full demo video on Google Drive](https://drive.google.com/file/d/1Wt7d5tvgd0an5yfNVBO17AuZ33Dtt1Jt/view?usp=sharing)**.*
 
 ## Results
 
